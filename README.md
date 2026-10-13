@@ -6,6 +6,8 @@
 
 ## 使用
 
+仓库内的 Codex 技能入口是 [skills/avantage-mcp/SKILL.md](skills/avantage-mcp/SKILL.md)，用于指导已连接 MCP 的谱图处理和分峰流程。它随源码保存，安装脚本不会把技能安装到个人技能目录。
+
 安装后在 Codex MCP 设置中启用 `avantage`，按客户端提示刷新连接或重新打开会话。可以直接用自然语言，例如：
 
 > 打开 E:\数据\样品\C1s.VGD，读取数据。设置 Shirley 背景，按我提供的峰位、峰宽和关联约束运行原生分峰。检查收敛情况，分别另存 VGD、VGT、分峰曲线 CSV 和模型参数 JSON。
