@@ -145,4 +145,3 @@ public sealed class NativePeakModel : IDisposable {
     public void Dispose(){foreach(var p in peaks)p.Dispose();peaks.Clear();}
 }
 }
-

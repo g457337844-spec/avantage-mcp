@@ -108,4 +108,3 @@ class ConstraintSpec(BaseModel):
         if self.type == "range" and self.value1 > self.value2:
             raise ValueError("Range lower bound must not exceed its upper bound.")
         return self
-

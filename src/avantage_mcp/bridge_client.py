@@ -316,4 +316,3 @@ class BridgeClient:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
-

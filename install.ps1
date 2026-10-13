@@ -93,4 +93,3 @@ if ($RegisterCodex) {
 Write-Output "Installed Avantage MCP: $projectRoot"
 Write-Output "Client configuration: $(Join-Path $projectRoot 'mcp-config.json')"
 if (!$RegisterCodex) { Write-Output 'Codex configuration was not changed. Use -RegisterCodex to register this server.' }
-

@@ -8,4 +8,3 @@ if not exist "%AVANTAGE_MCP_ROOT%.venv\Scripts\python.exe" (
 if not defined AVANTAGE_BRIDGE_PATH set "AVANTAGE_BRIDGE_PATH=%AVANTAGE_MCP_ROOT%native\AvantageBridge.exe"
 "%AVANTAGE_MCP_ROOT%.venv\Scripts\python.exe" -m avantage_mcp.server %*
 exit /b %errorlevel%
-
