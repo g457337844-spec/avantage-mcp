@@ -16,8 +16,8 @@ from mcp.types import ToolAnnotations
 from .bridge_client import BridgeClient, BridgeError
 from .schemas import (
     BackgroundKind, ConstraintSpec, EndpointAverage, EnergyShift, ExportFormat,
-    FilePath, Finite, FitIterations, FitTimeout, Nonnegative, Offset, PageSize, PeakAttribute, PeakId, PeakPatch, PeakSpec,
-    Positive, SessionId, ShirleyIterations, TougaardType,
+    DocumentId, FilePath, Finite, FitIterations, FitTimeout, Nonnegative, Offset, PageSize, PeakAttribute, PeakId, PeakPatch, PeakSpec,
+    Positive, ProjectId, SessionId, ShirleyIterations, SpectrumIndex, TougaardType,
 )
 
 
@@ -41,9 +41,10 @@ def create_server(bridge: BridgeClient | None = None) -> FastMCP:
         "Avantage MCP",
         instructions=(
             "Control the installed Thermo Scientific Avantage spectrum processing components. "
-            "Use avantage_status first, then open a spectrum to obtain a session id. "
+            "Use avantage_status first. For VGP, open a processing project, list spectra and open a selected spectrum; for VGD, open a spectrum directly. "
             "Sessions edit private working copies while preserving source files; save explicitly to a separate destination for delivery. "
-            "Use absolute Windows paths. After a bridge restart, reopen spectra. "
+            "Use absolute Windows paths. After a bridge restart, reopen projects and spectra and relist application documents. "
+            "Live document operations require explicit verified native capabilities; a private session edit alone does not update the visible application. "
             "Never infer scientific fit validity from transport success."
         ),
         lifespan=lifespan,
@@ -56,6 +57,17 @@ def create_server(bridge: BridgeClient | None = None) -> FastMCP:
         except BridgeError as exc:
             details = "" if exc.details is None else " Details: " + json.dumps(exc.details, ensure_ascii=False, default=str)
             raise ToolError(f"{exc.code}: {exc.message}{details}") from exc
+
+    async def invoke_live(operation: str, **arguments: Any) -> Any:
+        # Do not turn unverified native application entry points into public,
+        # callable tools merely because their experimental routes exist.
+        status = await invoke("status")
+        if not isinstance(status, dict) or status.get("native_live_document_bridge_verified") is not True:
+            raise ToolError(
+                "LIVE_DOCUMENT_BRIDGE_NOT_VERIFIED: Live document integration is not enabled for this build. "
+                "Use a private VGP project or VGD session. No live document operation was sent."
+            )
+        return await invoke(operation, **arguments)
 
     @app.tool(annotations=READ)
     async def avantage_status() -> dict[str, Any]:
@@ -91,6 +103,122 @@ def create_server(bridge: BridgeClient | None = None) -> FastMCP:
         file is retained; explicitly save to a destination to persist processing.
         """
         return await invoke("open_spectrum", path=path)
+
+    @app.tool(annotations=SESSION)
+    async def avantage_open_processing_project(path: FilePath) -> dict[str, Any]:
+        """Read an Avantage .VGP and its adjacent matching .DATA directory into a private snapshot.
+
+        Returns project_id and spectra with their zero-based indices. Existing
+        fitted peaks, backgrounds and constraints can be opened for editing via
+        avantage_open_project_spectrum. The original project is protected.
+        This does not attach to or alter an open Avantage window.
+        """
+        return await invoke("open_processing_project", path=path)
+
+    @app.tool(annotations=READ)
+    async def avantage_list_project_spectra(project_id: ProjectId) -> dict[str, Any]:
+        """List names, source references, point counts and fitted-peak counts in a private VGP snapshot."""
+        return await invoke("list_project_spectra", project_id=project_id)
+
+    @app.tool(annotations=SESSION)
+    async def avantage_open_project_spectrum(
+        project_id: ProjectId, spectrum_index: SpectrumIndex,
+    ) -> dict[str, Any]:
+        """Create an editable session for one VGP spectrum, preserving native data and existing model.
+
+        Use an index from avantage_list_project_spectra. Returns session_id plus
+        imported background, peak parameters and constraints. A session edit
+        does not update the source VGP or an open application document.
+        """
+        return await invoke("open_project_spectrum", project_id=project_id, spectrum_index=spectrum_index)
+
+    @app.tool(annotations=WRITE)
+    async def avantage_close_processing_project(project_id: ProjectId) -> dict[str, Any]:
+        """Release a private VGP snapshot. Independently opened spectrum sessions remain editable."""
+        return await invoke("close_processing_project", project_id=project_id)
+
+    @app.tool(annotations=WRITE)
+    async def avantage_save_project_model(session_id: SessionId, path: FilePath) -> dict[str, Any]:
+        """Save a selected project spectrum's edited model in a new complete .VGP project copy.
+
+        Requires a session opened by avantage_open_project_spectrum and an open
+        source project. The destination VGP and matching .DATA directory must
+        not exist. Requires native_project_save_verified=true; otherwise no
+        project write is sent. Check the result's native reload verification.
+        This creates a project copy without changing an open Avantage window.
+        """
+        status = await invoke("status")
+        if not isinstance(status, dict) or status.get("native_project_save_verified") is not True:
+            raise ToolError(
+                "PROJECT_SAVE_NOT_VERIFIED: Complete VGP model saving is not enabled for this build. "
+                "No project write was sent."
+            )
+        return await invoke("save_project_model", session_id=session_id, path=path)
+
+    @app.tool(annotations=READ)
+    async def avantage_list_processing_documents() -> dict[str, Any]:
+        """List documents in the running Avantage application, when live integration is verified.
+
+        Document ids belong to this worker. Relist after a worker restart. A
+        build without native_live_document_bridge_verified=true rejects this
+        request before invoking the experimental live interface.
+        """
+        return await invoke_live("list_processing_documents")
+
+    @app.tool(annotations=READ)
+    async def avantage_list_document_spectra(document_id: DocumentId) -> dict[str, Any]:
+        """List spectra and native fitted-peak counts in a live Avantage document.
+
+        Requires verified live integration. Choose the spectrum_index from this
+        result when attaching, rather than inferring the currently selected grid.
+        """
+        return await invoke_live("list_document_spectra", document_id=document_id)
+
+    @app.tool(annotations=SESSION)
+    async def avantage_open_processing_document(path: FilePath) -> dict[str, Any]:
+        """Open an existing .VGP or .VGD in Avantage and return a verified nonempty document.
+
+        Requires verified live integration and its exact supported application
+        build. VGP needs its matching adjacent .DATA directory.
+        """
+        return await invoke_live("open_processing_document", path=path)
+
+    @app.tool(annotations=SESSION)
+    async def avantage_attach_document_spectrum(
+        document_id: DocumentId, spectrum_index: SpectrumIndex,
+    ) -> dict[str, Any]:
+        """Snapshot one live spectrum and its existing native peak model for conversational edits.
+
+        Requires verified live integration. Returns session_id with a live link;
+        edits stay private until avantage_apply_fit_to_document succeeds. Use
+        this attachment rather than a separate VGP/VGD session for live apply.
+        """
+        return await invoke_live("attach_document_spectrum", document_id=document_id, spectrum_index=spectrum_index)
+
+    @app.tool(annotations=WRITE)
+    async def avantage_apply_fit_to_document(session_id: SessionId) -> dict[str, Any]:
+        """Apply an attached session's peak model to its corresponding live Avantage spectrum.
+
+        Requires verified live integration and a current live attachment. An
+        edited private model alone does not prove successful application. Check
+        the returned native readback verification before reporting success.
+        The operation saves and displays a complete private VGP copy, retaining
+        a checkpoint. Save the document to a chosen new path for delivery.
+        """
+        return await invoke_live("apply_fit_to_document", session_id=session_id)
+
+    @app.tool(annotations=WRITE)
+    async def avantage_save_processing_document(
+        document_id: DocumentId, path: FilePath,
+    ) -> dict[str, Any]:
+        """Save a live Avantage processing document as a verified new VGP and companion data.
+
+        Requires verified live integration. Existing targets and companion data
+        directories are rejected. A private checkpoint is retained, and the complete
+        verified copy opens in a fresh Avantage document/view. Reattach before
+        further edits. Source-file overwrite is not offered.
+        """
+        return await invoke_live("save_processing_document", document_id=document_id, path=path)
 
     @app.tool(annotations=READ)
     async def avantage_list_sessions() -> dict[str, Any]:
@@ -148,8 +276,8 @@ def create_server(bridge: BridgeClient | None = None) -> FastMCP:
         default to the spectrum's minimum and maximum binding energy. Supply
         increasing endpoints inside the spectrum and enough points for averaging.
         Shirley settings apply only to kind='shirley'; Tougaard settings apply
-        only to kind='tougaard'. Set the background before
-        defining peaks; clear the existing peak model before replacing it.
+        only to kind='tougaard'. Replacing the background preserves existing
+        peaks, parameters and constraints; the previous fit report is cleared.
         Original intensities are retained; subtraction is returned separately.
         """
         args = {"session_id": session_id, "kind": kind,
@@ -242,7 +370,7 @@ def create_server(bridge: BridgeClient | None = None) -> FastMCP:
         residual metrics; reaching the iteration limit is not convergence.
         asymmetric=False fits symmetric G/L shapes; True enables native tails.
         Keep the bridge and MCP client timeout longer than timeout_seconds.
-        Save the fitted peak table separately as VGT; VGD contains the spectrum.
+        Save as a complete VGP or export the fitted peak table as VGT; VGD contains the spectrum.
         """
         return await invoke("run_fit", session_id=session_id, max_iterations=max_iterations,
                             tolerance=tolerance, asymmetric=asymmetric, timeout_seconds=timeout_seconds)

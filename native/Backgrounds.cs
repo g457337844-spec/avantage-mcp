@@ -148,11 +148,15 @@ public sealed class NativeBackground : IDisposable {
 }
 public sealed partial class Engine {
     object SetBackground(SpectrumSession s,Dictionary<string,object> args) {
-        if(s.FitState!=null)throw new Fault("MODEL_ALREADY_DEFINED","Set the background before defining peaks; clear the fit model to change its background.");
         var replacement=NativeBackground.Create(s,args);
-        if(s.BackgroundState!=null)s.BackgroundState.Dispose();
-        s.BackgroundState=replacement;
-        return J.Obj("session_id",s.Id,"background",replacement.Info());
+        try {
+            var info=replacement.Info();
+            if(s.FitState!=null)NativeModelBackgroundChange.Replace(Model(s),replacement);
+            var previous=s.BackgroundState;
+            s.BackgroundState=replacement;replacement=null;
+            if(previous!=null)previous.Dispose();
+            return J.Obj("session_id",s.Id,"background",info);
+        } finally {if(replacement!=null)replacement.Dispose();}
     }
     object GetBackground(SpectrumSession s){return J.Obj("session_id",s.Id,"background",s.BackgroundState==null?null:s.BackgroundState.Info());}
     object GetBackgroundData(SpectrumSession s,Dictionary<string,object> args) {

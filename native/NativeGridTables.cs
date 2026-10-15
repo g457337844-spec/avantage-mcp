@@ -60,6 +60,7 @@ namespace AvantageMcp
                     throw new NotSupportedException("Native fitting host is disabled for this ProcessGrid.dll build (SHA256 " + hash + ").");
                 module = LoadLibraryEx(path, IntPtr.Zero, 0x1100);
                 if (module == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not load verified ProcessGrid.dll.");
+                ProjectPersistence.EnsureIndependentCache();
                 // Kept loaded while native function pointers and table objects may exist.
             }
         }

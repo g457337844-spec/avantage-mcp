@@ -14,15 +14,19 @@ namespace AvantageMcp
         private static readonly Guid AppClass = new Guid("052CC3C7-B7E2-40C3-92F5-3FA00FA81C1D");
         private static readonly Guid DispatchInterface = new Guid("00020400-0000-0000-C000-000000000046");
 
-        [DllImport("ole32.dll", ExactSpelling = true)]
-        private static extern int CoCreateInstance(ref Guid clsid, IntPtr outer, uint context,
-            ref Guid iid, [MarshalAs(UnmanagedType.Interface)] out object value);
+        [DllImport("oleaut32.dll", ExactSpelling = true)]
+        private static extern int GetActiveObject(ref Guid clsid, IntPtr reserved,
+            [MarshalAs(UnmanagedType.IUnknown)] out object value);
 
         private static object Connect()
         {
-            Guid clsid = AppClass, iid = DispatchInterface;
+            Guid clsid = AppClass;
             object value;
-            int hr = CoCreateInstance(ref clsid, IntPtr.Zero, 4, ref iid, out value);
+            // CoCreateInstance changes Avantage to Remote Controlled even when it
+            // is already running, disabling File Open. Status must remain read-only.
+            int hr = GetActiveObject(ref clsid, IntPtr.Zero, out value);
+            if (hr == unchecked((int)0x800401e3))
+                throw new Fault("INTERACTIVE_MODE_PROTECTED", "Avantage does not expose a running automation object. Status skipped automation activation to preserve interactive File Open.");
             Marshal.ThrowExceptionForHR(hr);
             return value;
         }
@@ -105,6 +109,8 @@ namespace AvantageMcp
             }
             catch (Exception ex)
             {
+                Fault fault = ex as Fault;
+                if (fault != null) result["connection_error_code"] = fault.Code;
                 result["connection_error"] = ex.GetType().Name + ": " + ex.Message;
             }
             finally { Release(experiment); Release(application); }

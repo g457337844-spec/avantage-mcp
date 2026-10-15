@@ -10,7 +10,10 @@ def _absolute_windows_path(value: str) -> str:
         raise ValueError("Use an absolute Windows path, such as C:\\data\\spectrum.VGD.")
     return value
 
-SessionId = Annotated[str, Field(min_length=1, max_length=128, description="Session id returned by avantage_open_spectrum.")]
+SessionId = Annotated[str, Field(min_length=1, max_length=128, description="Editable session id returned by opening or attaching a spectrum.")]
+ProjectId = Annotated[str, Field(min_length=1, max_length=128, description="Worker-local project id returned by avantage_open_processing_project.")]
+DocumentId = Annotated[str, Field(min_length=1, max_length=128, description="Worker-local document id returned by avantage_list_processing_documents or avantage_open_processing_document.")]
+SpectrumIndex = Annotated[int, Field(ge=0, le=9999, description="Zero-based spectrum index returned by the corresponding project or document spectrum list.")]
 FilePath = Annotated[str, Field(min_length=1, max_length=32767, description="Absolute local Windows file path. Unicode paths are supported."), AfterValidator(_absolute_windows_path)]
 Offset = Annotated[int, Field(ge=0, description="Zero-based first point in the requested page.")]
 PageSize = Annotated[int, Field(ge=1, le=10000, description="Maximum data points to return, between 1 and 10000.")]

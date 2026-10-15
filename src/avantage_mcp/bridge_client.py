@@ -2,7 +2,7 @@
 
 Only this server's worker is terminated on protocol failure or timeout. The
 Avantage application's process is never killed. A restarted worker cannot reuse
-in-memory spectrum sessions, so stale session ids are rejected explicitly.
+in-memory sessions, projects or document proxies, so their stale ids are rejected.
 """
 
 from __future__ import annotations
@@ -72,6 +72,10 @@ class BridgeClient:
         self._write_results: queue.Queue[Exception | None] | None = None
         self._known_sessions: set[str] = set()
         self._invalidated_sessions: set[str] = set()
+        self._known_projects: set[str] = set()
+        self._invalidated_projects: set[str] = set()
+        self._known_documents: set[str] = set()
+        self._invalidated_documents: set[str] = set()
         self._closed = False
 
     @property
@@ -159,6 +163,10 @@ class BridgeClient:
         invalidated = sorted(self._known_sessions)
         self._invalidated_sessions.update(self._known_sessions)
         self._known_sessions.clear()
+        self._invalidated_projects.update(self._known_projects)
+        self._known_projects.clear()
+        self._invalidated_documents.update(self._known_documents)
+        self._known_documents.clear()
         process, self._process = self._process, None
         if process is not None:
             if graceful and process.stdin:
@@ -192,8 +200,13 @@ class BridgeClient:
         return invalidated
 
     def _fail(self, code: str, message: str) -> None:
+        projects = sorted(self._known_projects)
+        documents = sorted(self._known_documents)
         sessions = self._stop()
-        raise BridgeError(code, message, {"invalidated_sessions": sessions, "stderr": self.stderr_tail})
+        raise BridgeError(code, message, {
+            "invalidated_sessions": sessions, "invalidated_projects": projects,
+            "invalidated_documents": documents, "stderr": self.stderr_tail,
+        })
 
     def call(self, operation: str, arguments: dict[str, Any] | None = None) -> Any:
         """Perform exactly one native operation; timeout includes worker response.
@@ -210,6 +223,18 @@ class BridgeClient:
                 raise BridgeError(
                     "SESSION_INVALIDATED", "The native worker restarted. Reopen this spectrum.",
                     {"session_id": session_id},
+                )
+            project_id = args.get("project_id")
+            if project_id in self._invalidated_projects:
+                raise BridgeError(
+                    "PROJECT_INVALIDATED", "The native worker restarted. Reopen this VGP project.",
+                    {"project_id": project_id},
+                )
+            document_id = args.get("document_id")
+            if document_id in self._invalidated_documents:
+                raise BridgeError(
+                    "DOCUMENT_INVALIDATED", "The native worker restarted. Relist Avantage documents and reattach the spectrum.",
+                    {"document_id": document_id},
                 )
             request_id = uuid4().hex
             try:
@@ -284,13 +309,33 @@ class BridgeClient:
             if "result" not in response:
                 self._fail("BRIDGE_PROTOCOL_ERROR", "Native response is missing its result.")
             result = response["result"]
-            if operation == "open_spectrum" and isinstance(result, dict):
+            if operation in {"open_spectrum", "open_project_spectrum", "attach_document_spectrum"} and isinstance(result, dict):
                 opened_id = result.get("session_id")
                 if isinstance(opened_id, str):
                     self._known_sessions.add(opened_id)
                     self._invalidated_sessions.discard(opened_id)
             if operation == "close_session" and isinstance(session_id, str):
                 self._known_sessions.discard(session_id)
+            if operation == "open_processing_project" and isinstance(result, dict):
+                opened_id = result.get("project_id")
+                if isinstance(opened_id, str):
+                    self._known_projects.add(opened_id)
+                    self._invalidated_projects.discard(opened_id)
+            if operation == "close_processing_project" and isinstance(project_id, str):
+                self._known_projects.discard(project_id)
+            if operation in {
+                "list_processing_documents", "open_processing_document", "list_document_spectra",
+                "save_processing_document",
+            } and isinstance(result, dict):
+                documents = result.get("documents", [])
+                if isinstance(result.get("document"), dict):
+                    documents = [result["document"]]
+                if isinstance(documents, list):
+                    for document in documents:
+                        opened_id = document.get("document_id") if isinstance(document, dict) else None
+                        if isinstance(opened_id, str):
+                            self._known_documents.add(opened_id)
+                            self._invalidated_documents.discard(opened_id)
             return result
 
     def close(self) -> None:

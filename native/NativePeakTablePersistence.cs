@@ -32,7 +32,7 @@ namespace AvantageMcp
             if(address==IntPtr.Zero)throw new EntryPointNotFoundException(name);
             return Marshal.GetDelegateForFunctionPointer(address,typeof(T))as T;
         }
-        sealed class Document : IDisposable
+        internal sealed class Document : IDisposable
         {
             public IntPtr Handle,Data;
             bool initialized;
@@ -43,11 +43,15 @@ namespace AvantageMcp
                 Marshal.ThrowExceptionForHR(OleInitialize(IntPtr.Zero));initialized=true;
                 try
                 {
+                    ProjectPersistence.EnsureIndependentCache();
                     Handle=Bind<Factory>("?CreateObject@CProcessGridDoc@@SAPEAVCObject@@XZ")();
                     if(Handle==IntPtr.Zero)throw new OutOfMemoryException();
-                    Data=Marshal.GetComInterfaceForObject(source,typeof(IDataSpace));
-                    if(Bind<AddData>("?AddDataSpace@CProcessGridDoc@@QEAAHPEAUIDataSpace@@W4eDataState@@@Z")(Handle,Data,0)!=1)
-                        throw new InvalidOperationException("Avantage refused the document spectrum.");
+                    ProjectPersistence.InitializeDocumentCache(Handle);
+                    if(source!=null) {
+                        Data=Marshal.GetComInterfaceForObject(source,typeof(IDataSpace));
+                        if(Bind<AddData>("?AddDataSpace@CProcessGridDoc@@QEAAHPEAUIDataSpace@@W4eDataState@@@Z")(Handle,Data,0)!=1)
+                            throw new InvalidOperationException("Avantage refused the document spectrum.");
+                    }
                 }
                 catch{Dispose();throw;}
             }
@@ -60,6 +64,38 @@ namespace AvantageMcp
             }
             public void Save(string path){Bind<FileOperation>("?SavePeakTable@CProcessGridDoc@@UEAAXPEB_W@Z")(Handle,path);}
             public void Load(string path){Bind<FileOperation>("?LoadPeakTable@CProcessGridDoc@@UEAAXPEB_W@Z")(Handle,path);}
+            [UnmanagedFunctionPointer(CallingConvention.Cdecl)] delegate IntPtr UnknownInterface(IntPtr self);
+            [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int GetPointer(IntPtr self,out IntPtr value);
+            [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int NoArguments(IntPtr self);
+            [UnmanagedFunctionPointer(CallingConvention.StdCall)] delegate int GetAssociatedPeaks(IntPtr self,IntPtr data,out IntPtr array,out int count);
+            static T At<T>(IntPtr pointer,int slot) where T:class {return Marshal.GetDelegateForFunctionPointer(Marshal.ReadIntPtr(Marshal.ReadIntPtr(pointer),slot*IntPtr.Size),typeof(T))as T;}
+            internal IntPtr ProcessingInterface() {
+                IntPtr borrowed=Bind<UnknownInterface>("?GetUnknownInterface@CProcessGridDoc@@QEAAPEAUIUnknown@@XZ")(Handle);
+                Guid iid=new Guid("6E55B71A-944B-11D4-866C-00C04F68D1AC");IntPtr owned;
+                Marshal.ThrowExceptionForHR(Marshal.QueryInterface(borrowed,ref iid,out owned));return owned;
+            }
+            // These registered interface slots are verified against the installed NDR proxy.
+            internal List<IntPtr> EnumerateDataSpaces() {
+                IntPtr processor=ProcessingInterface(),enumerator=IntPtr.Zero;var result=new List<IntPtr>();
+                try {
+                    Marshal.ThrowExceptionForHR(At<GetPointer>(processor,18)(processor,out enumerator));
+                    Marshal.ThrowExceptionForHR(At<NoArguments>(enumerator,4)(enumerator));
+                    for(int i=0;i<4096;i++) {IntPtr data;int hr=At<GetPointer>(enumerator,3)(enumerator,out data);Marshal.ThrowExceptionForHR(hr);if(data==IntPtr.Zero)return result;result.Add(data);}
+                    throw new Fault("PROJECT_SIZE","The project contains more than 4096 spectra.");
+                } catch {foreach(var data in result)Marshal.Release(data);throw;}
+                finally {if(enumerator!=IntPtr.Zero)Marshal.Release(enumerator);Marshal.Release(processor);}
+            }
+            internal List<IAvFittedPeak> PeaksFor(IDataSpace source) {
+                IntPtr processor=ProcessingInterface(),data=Marshal.GetComInterfaceForObject(source,typeof(IDataSpace)),array=IntPtr.Zero;int count;
+                var result=new List<IAvFittedPeak>();
+                try {
+                    Marshal.ThrowExceptionForHR(At<GetAssociatedPeaks>(processor,16)(processor,data,out array,out count));
+                    if(count<0||count>10000)throw new Fault("MODEL_SIZE","Unexpected native project peak count.");
+                    for(int i=0;i<count;i++){IntPtr peak=Marshal.ReadIntPtr(array,i*IntPtr.Size);try{result.Add((IAvFittedPeak)Marshal.GetObjectForIUnknown(peak));}finally{Marshal.Release(peak);}}
+                    return result;
+                } catch {foreach(var peak in result)Marshal.ReleaseComObject(peak);throw;}
+                finally {if(array!=IntPtr.Zero)Marshal.FreeCoTaskMem(array);Marshal.Release(data);Marshal.Release(processor);}
+            }
             public List<IAvFittedPeak> Peaks()
             {
                 var result=new List<IAvFittedPeak>();
@@ -127,8 +163,9 @@ namespace AvantageMcp
             }
             if(!File.Exists(path)||new FileInfo(path).Length==0)throw new IOException("Avantage did not create the peak-table file.");
             var verified=Inspect(path,source);
-            if(!Equivalent(expected,verified["peaks"]))throw new InvalidOperationException("Native peak-table roundtrip did not preserve every peak, background and constraint.");
+            if(!PersistedEquivalent(expected,verified["peaks"]))throw new InvalidOperationException("Native peak-table roundtrip did not preserve every peak, background and constraint.");
             verified["roundtrip_verified"]=true;
+            verified["runtime_display_ratios_persisted"]=false;
             return verified;
         }
 
@@ -191,12 +228,14 @@ namespace AvantageMcp
             }
         }
 
-        static List<Dictionary<string,object>> ReadPeaks(IList<IAvFittedPeak> peaks)
+        internal static List<Dictionary<string,object>> ReadPeaks(IList<IAvFittedPeak> peaks)
         {
             var pointers=new List<IntPtr>();
             try
             {
-                foreach(var peak in peaks)pointers.Add(Marshal.GetComInterfaceForObject(peak,typeof(IAvFittedPeak)));
+                // IUnknown is the COM identity. An RPC out-reference can expose
+                // a different interface proxy than GetComInterfaceForObject.
+                foreach(var peak in peaks){IntPtr typed=Marshal.GetComInterfaceForObject(peak,typeof(IAvFittedPeak));try{Guid iid=new Guid("00000000-0000-0000-C000-000000000046");IntPtr identity;Marshal.ThrowExceptionForHR(Marshal.QueryInterface(typed,ref iid,out identity));pointers.Add(identity);}finally{Marshal.Release(typed);}}
                 var result=new List<Dictionary<string,object>>();
                 for(int index=0;index<peaks.Count;index++)
                 {
@@ -212,8 +251,9 @@ namespace AvantageMcp
                             constraint=(IAvPeakConstraint)Marshal.GetObjectForIUnknown(raw);
                             int type,op,active;double v1,v2,v3;IntPtr reference;
                             constraint.GetParameters(out type,out v1,out v2,out v3,out reference,out op);constraint.IsConstrained(out active);
-                            try{if(active!=0)constraints.Add(new Dictionary<string,object>{{"attribute",attr},{"type",type},{"value1",v1},{"value2",v2},{"value3",v3},{"operator",op},{"reference_peak_index",reference==IntPtr.Zero?(object)null:pointers.IndexOf(reference)}});}
-                            finally{if(reference!=IntPtr.Zero)Marshal.Release(reference);}
+                            IntPtr identity=IntPtr.Zero;
+                            try{if(reference!=IntPtr.Zero){Guid iid=new Guid("00000000-0000-0000-C000-000000000046");Marshal.ThrowExceptionForHR(Marshal.QueryInterface(reference,ref iid,out identity));}if(active!=0)constraints.Add(new Dictionary<string,object>{{"attribute",attr},{"type",type},{"value1",v1},{"value2",v2},{"value3",v3},{"operator",op},{"reference_peak_index",identity==IntPtr.Zero?(object)null:pointers.IndexOf(identity)}});}
+                            finally{if(identity!=IntPtr.Zero)Marshal.Release(identity);if(reference!=IntPtr.Zero)Marshal.Release(reference);}
                         }
                         finally{if(constraint!=null)Marshal.ReleaseComObject(constraint);Marshal.Release(raw);}
                     }
@@ -266,7 +306,33 @@ namespace AvantageMcp
             double value;var call=(GetDouble)Marshal.GetDelegateForFunctionPointer(Marshal.ReadIntPtr(Marshal.ReadIntPtr(instance),slot*IntPtr.Size),typeof(GetDouble));
             Marshal.ThrowExceptionForHR(call(instance,out value));return value;
         }
-        static bool Equivalent(object a,object b)
+        // Avantage keeps area/height display ratios on the fitted object's
+        // runtime state, outside its serialized parameter levels. Native VGT/VGP
+        // Save/Load resets these two ratios to 1. Compare persistent quantities
+        // while retaining the actual ratios in ReadPeaks for the caller.
+        internal static object PersistedModelParameters(object value)
+        {
+            var record=value as IDictionary<string,object>;
+            if(record!=null)
+            {
+                bool fitted=record.ContainsKey("centre_kinetic_ev")&&
+                    record.ContainsKey("native_gl_combine_method")&&record.ContainsKey("constraints");
+                var normalized=new Dictionary<string,object>();
+                foreach(var pair in record)
+                    if(!fitted||(pair.Key!="area_ratio"&&pair.Key!="height_ratio"))
+                        normalized.Add(pair.Key,PersistedModelParameters(pair.Value));
+                return normalized;
+            }
+            var sequence=value as System.Collections.IEnumerable;
+            if(!(value is string)&&sequence!=null)
+                return sequence.Cast<object>().Select(PersistedModelParameters).ToArray();
+            return value;
+        }
+        internal static bool PersistedEquivalent(object first,object second)
+        {
+            return Equivalent(PersistedModelParameters(first),PersistedModelParameters(second));
+        }
+        internal static bool Equivalent(object a,object b)
         {
             if(a==null||b==null)return a==b;
             var ad=a as IDictionary<string,object>;var bd=b as IDictionary<string,object>;

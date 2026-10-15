@@ -17,8 +17,14 @@ for line in sys.stdin.buffer:
     request = json.loads(line)
     op, args = request["operation"], request["arguments"]
     response = {"id": request["id"], "ok": True, "result": args}
-    if op == "open_spectrum":
+    if op in {"open_spectrum", "open_project_spectrum", "attach_document_spectrum"}:
         response["result"] = {"session_id": "s-" + str(os.getpid())}
+    elif op == "open_processing_project":
+        response["result"] = {"project_id": "p-" + str(os.getpid())}
+    elif op == "list_processing_documents":
+        response["result"] = {"documents": [{"document_id": "d-" + str(os.getpid())}]}
+    elif op in {"open_processing_document", "list_document_spectra", "save_processing_document"}:
+        response["result"] = {"document": {"document_id": "d-" + str(os.getpid())}}
     elif op == "sleep":
         time.sleep(30)
     elif op == "crash":
@@ -109,6 +115,39 @@ def test_crash_reports_stderr_and_can_restart(worker: list[str]) -> None:
         assert "deliberate worker failure" in failure.value.details["stderr"]
         assert bridge.pid is None
         assert bridge.call("echo", {"restart": "ok"}) == {"restart": "ok"}
+
+
+def test_restart_invalidates_project_document_and_attached_session_ids(worker: list[str]) -> None:
+    with BridgeClient(command=worker, timeout=15) as bridge:
+        project_id = bridge.call("open_processing_project")["project_id"]
+        document_id = bridge.call("list_processing_documents")["documents"][0]["document_id"]
+        session_id = bridge.call("attach_document_spectrum", {"document_id": document_id})["session_id"]
+        with pytest.raises(BridgeError) as failure:
+            bridge.call("crash")
+        assert failure.value.details["invalidated_projects"] == [project_id]
+        assert failure.value.details["invalidated_documents"] == [document_id]
+        assert failure.value.details["invalidated_sessions"] == [session_id]
+        for operation, arguments, expected in [
+            ("open_project_spectrum", {"project_id": project_id}, "PROJECT_INVALIDATED"),
+            ("list_document_spectra", {"document_id": document_id}, "DOCUMENT_INVALIDATED"),
+            ("apply_fit_to_document", {"session_id": session_id}, "SESSION_INVALIDATED"),
+        ]:
+            with pytest.raises(BridgeError, match=expected):
+                bridge.call(operation, arguments)
+            assert bridge.pid is None
+        # Reopening uses new worker-local ids rather than replaying a lost write.
+        reopened_id = bridge.call("open_processing_project")["project_id"]
+        assert reopened_id != project_id
+
+
+def test_closing_project_keeps_independently_opened_sessions(worker: list[str]) -> None:
+    with BridgeClient(command=worker, timeout=15) as bridge:
+        project_id = bridge.call("open_processing_project")["project_id"]
+        session_id = bridge.call("open_project_spectrum", {"project_id": project_id})["session_id"]
+        bridge.call("close_processing_project", {"project_id": project_id})
+        assert project_id not in bridge._known_projects
+        assert session_id in bridge._known_sessions
+        assert bridge.call("get_spectrum_info", {"session_id": session_id}) == {"session_id": session_id}
 
 
 def test_shutdown_interrupts_an_inflight_operation(worker: list[str]) -> None:

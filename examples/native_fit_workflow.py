@@ -23,7 +23,7 @@ async def workflow(destination: Path):
         async with ClientSession(read, write) as client:
             await client.initialize()
             tools = await client.list_tools()
-            assert len(tools.tools) == 31
+            assert len(tools.tools) == 42
 
             async def call(name, **arguments):
                 response = await client.call_tool("avantage_" + name, arguments)
