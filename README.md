@@ -1,8 +1,8 @@
 # Avantage MCP
 
-用于 Windows 上 Thermo Scientific Avantage 的本地 MCP，覆盖 VGD 谱图和 VGP 项目读取、能量校准、背景、峰参数与约束、原生自动分峰、曲线导出及原生峰表保存/导入。包括实时读取、修改并写回 Avantage 文档、完整 VGP 另存及重新读取核对。已在本机 **Avantage 6.9.0.59、Windows x64** 验证。
+用于 Windows 上 Thermo Scientific Avantage 的本地 MCP，覆盖 VGD/VGP 读取、背景、峰参数与约束、原生分峰和完整项目保存。当前版本 **1.3.0**，适配 **Avantage 6.9.0.59、Windows x64**。
 
-1.1.0 提供 42 个工具。实时文档接口只在已验证的原生构建上启用：`native_live_document_bridge_verified=true`。写回会先保存检查点，在独立缓存中生成并核对完整项目，再由 Avantage 在新文档/视图中加载并逐谱区读回；同时核对网格双向引用、布局和实际数据对象绑定。成功返回 `live_readback_verified=true`、`grid_bindings_verified=true`。
+当前提供 43 个工具。已经打开的 VGP 可以在原窗口直接调整已有峰参数和现有约束、执行原生拟合，默认完整备份后保存到原文件，无需关闭和重新打开。支持两个项目间选择目标；保存后核对所有谱区原始数据、模型和网格关联，并使旧关联失效。不会自动打开检查点或结果副本。自动打开/关闭文档继续禁用；改变峰数量、背景或约束属性集合仍使用私有项目文件流程。
 
 拟合直接调用 Avantage `PeakFitting.dll` 原生 simplex 引擎；背景、峰形和文件读写也使用厂商原生组件。每次拟合使用独立子进程，避免 MFC 拟合状态释放后再次运行崩溃。失败保留当前会话和模型；成功核对峰编号及谱图指纹，再替换参数。不依赖鼠标操作。
 
@@ -18,9 +18,11 @@
 
 读取已有 VGP 项目时，先 `open_processing_project(path)`，再 `list_project_spectra(project_id)`，从返回列表选择 `spectrum_index`，用 `open_project_spectrum(project_id, spectrum_index)` 获取可编辑的 `session_id`。已有峰、背景和约束会从原生项目载入；先读取模型，再按用户要求修改，避免无意清除原有设置。VGP 与同名 `.DATA` 目录须位于同一目录；MCP 会一起复制并校验。
 
-完整项目模型另存使用 `save_project_model(session_id, path)`，原生状态须为 `native_project_save_verified=true`，否则工具不发送写入。目标 VGP 及同名 `.DATA` 目录须不存在。使用来自项目的会话，并保持源项目打开；该操作生成完整项目副本，不修改当前应用窗口。
+日常调整已经打开的谱图：`list_processing_documents` → `list_document_spectra` → `attach_document_spectrum` → 修改参数/约束或 `run_fit` → `apply_fit_to_document(session_id)`。默认 `save_to_original=true`，完整备份后在原窗口执行普通保存，无需关闭或重开文档。完成后重新关联再做下一轮修改；旧关联会被标为过期。`save_to_original=false` 仅更新当前窗口。
 
-实时文档流程为 `list_processing_documents` → `list_document_spectra` → `attach_document_spectrum` → 修改或拟合 → `apply_fit_to_document` → `save_processing_document`。`apply_fit_to_document` 已将模型保存到私有完整 VGP 并显示在应用中，同时保留检查点；返回实际文件路径。随后用 `save_processing_document` 交付到用户指定的新路径，并核对 `roundtrip_verified`。两项操作都会生成检查点，并打开结果项目副本。旧检查点窗口可在完成后关闭。另存目标文件及同名 `.DATA` 目录必须不存在；另存后继续修改应重新关联谱图。
+新增/删除峰、替换背景或更改约束属性集合等结构修改，仍使用私有项目流程：`save_project_model(session_id)` 省略 `path`，备份并写回原文件。这个文件替换流程要求目标文档关闭；它与当前窗口普通保存是不同的路径。显式提供新 `path` 才会生成用户要求的副本，且不会自动打开窗口。
+
+实时连接使用随 Avantage 应用生命周期保留的辅助进程，避免每个 MCP 工作进程重复激活厂商工厂。正常退出 Avantage 时辅助进程自动退出。多个 MCP 进程的实时读取、项目快照和修改/保存事务互斥；冲突返回 `LIVE_OPERATION_BUSY`，不要自动重试写操作。启动通知或模态窗口未关闭时返回 `APP_MODAL_OR_STARTING`。需要禁用实时功能时设置 `AVANTAGE_DISABLE_LIVE=1`；私有文件处理不受影响。
 
 | 文件 | 内容和用途 |
 | --- | --- |
@@ -29,6 +31,8 @@
 | `.VGT` | Avantage 原生峰表，含峰、背景及约束；独立原生加载验证后发布 |
 | 模型 `.json` | MCP 模型参数和谱图指纹，支持恢复及关联峰编号重映射 |
 | 曲线 `.csv` / `.json` | 数据、背景、各分峰、总模型和残差 |
+
+原文件写回将暂存、完整备份和 `journal.json` 集中放在样品目录外、同一磁盘的 `<原文件磁盘>:\AvantageMCP\recovery\<目录路径摘要>\` 中，样品目录不再堆积测试文件夹。返回 `backup_path`、`journal_path`、`published_bytes_verified=true`、`application_windows_opened=0`。只有完整原生回读验证通过才发布。检测到并发修改或占用时停止；失败不得自动重试。VGP 和 DATA 成对回滚，断电后根据日志恢复，不承诺跨文件原子性。不要删除原项目的 `.DATA` 目录。
 
 独立 VGD/VGP 会话与当前可见网格不会自动同步。在 Avantage 中继续使用独立 VGD 结果时，打开匹配的 VGD，并用软件的峰表加载功能载入 VGT。`show_data_file` 仅发送 VGD 打开请求；`display_verified=false` 表示未核实可见网格。完整 VGP 模型另存和实时文档写回分别受独立的原生验证能力保护。
 
@@ -66,13 +70,14 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Python 'C:\Python312\pyt
 | `avantage_list_project_spectra` | 读取私有项目的谱图及已有峰数量 |
 | `avantage_open_project_spectrum` | 打开项目内指定谱图，载入已有峰、背景和约束 |
 | `avantage_close_processing_project` | 释放项目；独立打开的谱图会话保留 |
-| `avantage_save_project_model` | 将指定谱图的模型另存到完整 VGP 副本；需项目保存验证能力 |
+| `avantage_save_project_model` | 默认备份并保存到原 VGP；显式 path 才另存副本 |
 | `avantage_list_processing_documents` | 列出实时文档；需原生验证状态启用 |
 | `avantage_list_document_spectra` | 列出实时文档的谱图；需原生验证状态启用 |
-| `avantage_open_processing_document` | 在 Avantage 打开 VGP/VGD；需原生验证状态启用 |
+| `avantage_open_processing_document` | 已停用：请手动打开原文件，避免应用文档生命周期故障 |
 | `avantage_attach_document_spectrum` | 将实时谱图快照为带文档关联的会话；需原生验证状态启用 |
-| `avantage_apply_fit_to_document` | 把关联会话模型写回对应谱图；需原生验证状态启用 |
-| `avantage_save_processing_document` | 在应用另存完整文档；需原生验证状态启用 |
+| `avantage_apply_fit_to_document` | 原窗口更新已有峰参数/约束，默认完整备份并保存原文件 |
+| `avantage_save_processing_document` | 普通保存当前原文件，强制完整备份与回读验证 |
+| `avantage_save_processing_document_in_place` | 同上；保留原窗口，禁止另存为 |
 | `avantage_list_sessions` | 已打开会话 |
 | `avantage_close_session` | 释放会话 |
 | `avantage_get_spectrum_info` | 轴、点数及来源 |
@@ -161,9 +166,9 @@ $env:AVANTAGE_INTEGRATION = '1'
 
 真实测试覆盖源文件保护、中文路径、保存重开、能量校准、五种背景、峰与约束、对称/非对称连续拟合、同一会话重复拟合、迭代上限、限定范围、全部参数固定、失败保留模型、VGT/JSON 重载及 IPC 故障恢复。未设置环境变量时跳过依赖本机 Avantage 的测试。
 
-42 个工具已由实际 MCP 客户端发现。窗口流程覆盖读取现有模型、背景替换、峰参数、增删峰、固定/范围/关联约束、原生优化、连续写回、完整项目另存和新进程读取。项目测试使用外部提供的私有副本，仓库不含用户谱图。
+当前实际 MCP 客户端发现 43 个工具。1.3.0 验证覆盖连续两轮默认实时应用并保存、独立进程回读、正常关闭重开，以及两个已打开项目之间切换并分别保存、另一个项目保持不变。旧内部 SaveDocument 路径不再使用；保存后释放并重新取得谱图对象，避免复用失效的对象列表。仓库不含用户谱图和拟合结果。
 
-文件测试另设 `$env:AVANTAGE_VGP_FIXTURE` 为带同名 `.DATA` 的完整项目。实时测试还需启动一个 Avantage，并设置 `$env:AVANTAGE_LIVE_INTEGRATION='1'`；测试会打开并修改自己的新副本。验证详情见 [docs/validation.md](docs/validation.md)。可复现原生拟合示例：
+文件测试另设 `$env:AVANTAGE_VGP_FIXTURE` 为带同名 `.DATA` 的完整项目。实时保护测试还需设置 `$env:AVANTAGE_LIVE_INTEGRATION='1'`，不会自动打开或关闭应用文档。原窗口写入测试另需显式指定 `AVANTAGE_LIVE_WRITE_TEST=1`、`AVANTAGE_LIVE_WRITE_FIXTURE`，以及同名 `.mcp-test.json` 标记；该副本必须已打开，测试只修改并恢复峰标签。标记格式见验证文档。验证详情见 [docs/validation.md](docs/validation.md)。可复现原生拟合示例：
 
 ```powershell
 .\.venv\Scripts\python.exe .\examples\native_fit_workflow.py --output-dir 'C:\data\avantage-demo'

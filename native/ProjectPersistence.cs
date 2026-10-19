@@ -136,7 +136,7 @@ namespace AvantageMcp
                         throw new Fault("EXTERNAL_PROJECT_DATA","A project spectrum references data outside its private project directory.");
                     string relative=file.Substring(directory.Length),section=relative.Split(Path.DirectorySeparatorChar)[0];
                     if(!section.EndsWith(".DATA",StringComparison.OrdinalIgnoreCase)||!File.Exists(file))
-                        throw new Fault("COMPANION_DATA_MISSING","A referenced project spectrum is absent from its private .DATA directory.");
+                        throw new Fault("COMPANION_DATA_MISSING","A referenced project spectrum is absent from its private .DATA directory: recorded="+recorded+"; resolved="+file+"; exists="+File.Exists(file));
                     var data=new DataSpaceClass();
                     try {
                         data.LoadPersistFile(file,0,1,0);

@@ -1,6 +1,7 @@
 """Public project contracts and live capability protection; no Avantage application calls."""
 
 import asyncio
+from contextlib import nullcontext
 
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
@@ -14,7 +15,11 @@ class RecordingBridge:
         self.project_save_verified = project_save_verified
         self.calls = []
 
-    def call(self, operation, arguments):
+    def exclusive(self):
+        return nullcontext()
+
+    def call(self, operation, arguments=None):
+        arguments = arguments or {}
         self.calls.append((operation, arguments))
         if operation == "status":
             return {
@@ -90,11 +95,19 @@ def test_project_tools_forward_ids_and_unicode_paths(name, args, operation):
 LIVE_CASES = [
     ("avantage_list_processing_documents", {}, "list_processing_documents"),
     ("avantage_list_document_spectra", {"document_id": "d1"}, "list_document_spectra"),
-    ("avantage_open_processing_document", {"path": r"E:\数据\C.vgp"}, "open_processing_document"),
     ("avantage_attach_document_spectrum", {"document_id": "d1", "spectrum_index": 9}, "attach_document_spectrum"),
-    ("avantage_apply_fit_to_document", {"session_id": "s1"}, "apply_fit_to_document"),
-    ("avantage_save_processing_document", {"document_id": "d1", "path": r"E:\数据\结果.vgp"}, "save_processing_document"),
+    ("avantage_apply_fit_to_document", {"session_id": "s1", "save_to_original": False}, "apply_fit_to_document"),
 ]
+
+
+@pytest.mark.parametrize('live_verified', [False, True])
+def test_automatic_open_is_disabled_even_when_live_reads_are_verified(live_verified):
+    async def scenario():
+        bridge = RecordingBridge(live_verified=live_verified)
+        with pytest.raises(ToolError, match='LIVE_OPEN_NOT_VERIFIED'):
+            await create_server(bridge).call_tool('avantage_open_processing_document', {'path': r'E:\数据\2.vgp'})
+        assert bridge.calls == []
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("name,args,operation", LIVE_CASES)
@@ -113,6 +126,7 @@ def test_verified_live_routes_forward_after_capability_check(name, args, operati
     async def scenario():
         bridge = RecordingBridge(live_verified=True)
         await create_server(bridge).call_tool(name, args)
-        assert bridge.calls == [("status", {}), (operation, args)]
+        expected = {k:v for k,v in args.items() if k != 'save_to_original'}
+        assert bridge.calls == [("status", {}), (operation, expected)]
 
     asyncio.run(scenario())

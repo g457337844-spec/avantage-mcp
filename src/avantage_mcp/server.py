@@ -14,6 +14,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from .bridge_client import BridgeClient, BridgeError
+from .project_writeback import apply_document_model, save_document_in_place, save_project_model_in_place
 from .schemas import (
     BackgroundKind, ConstraintSpec, EndpointAverage, EnergyShift, ExportFormat,
     DocumentId, FilePath, Finite, FitIterations, FitTimeout, Nonnegative, Offset, PageSize, PeakAttribute, PeakId, PeakPatch, PeakSpec,
@@ -42,7 +43,8 @@ def create_server(bridge: BridgeClient | None = None) -> FastMCP:
         instructions=(
             "Control the installed Thermo Scientific Avantage spectrum processing components. "
             "Use avantage_status first. For VGP, open a processing project, list spectra and open a selected spectrum; for VGD, open a spectrum directly. "
-            "Sessions edit private working copies while preserving source files; save explicitly to a separate destination for delivery. "
+            "Save private VGP model edits to the original path by omitting the save path, with mandatory complete backups and no new application windows. Close that original document before replacing its bundle. "
+            "For an already-open original, attach its spectrum, edit existing peak parameters/constraints, then apply_fit_to_document; by default this saves with a full backup and retains that same window. Reattach after saving. Automatic opening and closing remain disabled. "
             "Use absolute Windows paths. After a bridge restart, reopen projects and spectra and relist application documents. "
             "Live document operations require explicit verified native capabilities; a private session edit alone does not update the visible application. "
             "Never infer scientific fit validity from transport success."
@@ -138,14 +140,14 @@ def create_server(bridge: BridgeClient | None = None) -> FastMCP:
         return await invoke("close_processing_project", project_id=project_id)
 
     @app.tool(annotations=WRITE)
-    async def avantage_save_project_model(session_id: SessionId, path: FilePath) -> dict[str, Any]:
-        """Save a selected project spectrum's edited model in a new complete .VGP project copy.
+    async def avantage_save_project_model(session_id: SessionId, path: FilePath | None = None) -> dict[str, Any]:
+        """Save a private project spectrum's edited model to its original VGP by default.
 
         Requires a session opened by avantage_open_project_spectrum and an open
-        source project. The destination VGP and matching .DATA directory must
-        not exist. Requires native_project_save_verified=true; otherwise no
-        project write is sent. Check the result's native reload verification.
-        This creates a project copy without changing an open Avantage window.
+        source project. Omit path to back up and replace the complete original
+        bundle; that original must be closed in Avantage. An explicit path
+        requests a new copy and must not exist. No application windows open.
+        Requires native_project_save_verified=true and full native verification.
         """
         status = await invoke("status")
         if not isinstance(status, dict) or status.get("native_project_save_verified") is not True:
@@ -153,7 +155,15 @@ def create_server(bridge: BridgeClient | None = None) -> FastMCP:
                 "PROJECT_SAVE_NOT_VERIFIED: Complete VGP model saving is not enabled for this build. "
                 "No project write was sent."
             )
-        return await invoke("save_project_model", session_id=session_id, path=path)
+        if path is not None:
+            return await invoke("save_project_model", session_id=session_id, path=path)
+        try:
+            return await asyncio.to_thread(save_project_model_in_place, client, session_id)
+        except BridgeError as exc:
+            details = '' if exc.details is None else ' Details: ' + json.dumps(exc.details, ensure_ascii=False, default=str)
+            raise ToolError(str(exc) + details) from exc
+        except (ValueError, OSError) as exc:
+            raise ToolError(str(exc)) from exc
 
     @app.tool(annotations=READ)
     async def avantage_list_processing_documents() -> dict[str, Any]:
@@ -176,12 +186,8 @@ def create_server(bridge: BridgeClient | None = None) -> FastMCP:
 
     @app.tool(annotations=SESSION)
     async def avantage_open_processing_document(path: FilePath) -> dict[str, Any]:
-        """Open an existing .VGP or .VGD in Avantage and return a verified nonempty document.
-
-        Requires verified live integration and its exact supported application
-        build. VGP needs its matching adjacent .DATA directory.
-        """
-        return await invoke_live("open_processing_document", path=path)
+        """Disabled: manual original-file opening is required after a lifecycle failure."""
+        raise ToolError("LIVE_OPEN_NOT_VERIFIED: Open the original manually in Avantage. No application call was sent.")
 
     @app.tool(annotations=SESSION)
     async def avantage_attach_document_spectrum(
@@ -196,34 +202,58 @@ def create_server(bridge: BridgeClient | None = None) -> FastMCP:
         return await invoke_live("attach_document_spectrum", document_id=document_id, spectrum_index=spectrum_index)
 
     @app.tool(annotations=WRITE)
-    async def avantage_apply_fit_to_document(session_id: SessionId) -> dict[str, Any]:
+    async def avantage_apply_fit_to_document(session_id: SessionId, save_to_original: bool = True) -> dict[str, Any]:
         """Apply an attached session's peak model to its corresponding live Avantage spectrum.
 
         Requires verified live integration and a current live attachment. An
         edited private model alone does not prove successful application. Check
         the returned native readback verification before reporting success.
-        The operation saves and displays a complete private VGP copy, retaining
-        a checkpoint. Save the document to a chosen new path for delivery.
+        By default, saves back to the attached original VGP with a complete
+        verified backup and retains the same existing window. Live apply requires
+        the existing peak count, background and constraint attributes; parameter
+        values and links may change. Unsupported structural edits are rejected
+        before mutation. Reattach after saving. save_to_original=false updates
+        that same live window without saving the source file.
         """
-        return await invoke_live("apply_fit_to_document", session_id=session_id)
+        try:
+            return await asyncio.to_thread(apply_document_model, client, session_id, save_to_original)
+        except BridgeError as exc:
+            details = "" if exc.details is None else " Details: " + json.dumps(exc.details, ensure_ascii=False, default=str)
+            raise ToolError(str(exc) + details) from exc
+        except (ValueError, OSError) as exc:
+            raise ToolError(str(exc)) from exc
 
     @app.tool(annotations=WRITE)
     async def avantage_save_processing_document(
         document_id: DocumentId, path: FilePath,
     ) -> dict[str, Any]:
-        """Save a live Avantage processing document as a verified new VGP and companion data.
+        """Back up and save this existing window to its own original path.
 
-        Requires verified live integration. Existing targets and companion data
-        directories are rejected. A private checkpoint is retained, and the complete
-        verified copy opens in a fresh Avantage document/view. Reattach before
-        further edits. Source-file overwrite is not offered.
+        Same verified operation as save_processing_document_in_place; no Save As.
         """
-        return await invoke_live("save_processing_document", document_id=document_id, path=path)
+        return await avantage_save_processing_document_in_place(document_id, path)
 
     @app.tool(annotations=READ)
     async def avantage_list_sessions() -> dict[str, Any]:
         """List spectra currently loaded in this MCP worker and their session ids."""
         return await invoke("list_sessions")
+
+    @app.tool(annotations=WRITE)
+    async def avantage_save_processing_document_in_place(
+        document_id: DocumentId, path: FilePath,
+    ) -> dict[str, Any]:
+        """Back up the full VGP+DATA, use ordinary Save and verify the saved project.
+
+        The target must be the active original document. Its window stays open.
+        No automatic retry follows an uncertain save. Reattach after saving.
+        """
+        try:
+            return await asyncio.to_thread(save_document_in_place, client, document_id, path)
+        except BridgeError as exc:
+            details = "" if exc.details is None else " Details: " + json.dumps(exc.details, ensure_ascii=False, default=str)
+            raise ToolError(str(exc) + details) from exc
+        except (ValueError, OSError) as exc:
+            raise ToolError(str(exc)) from exc
 
     @app.tool(annotations=WRITE)
     async def avantage_close_session(session_id: SessionId) -> dict[str, Any]:

@@ -27,7 +27,10 @@ public static class Program {
             string path = Path.Combine(bin, name + ".dll");
             return File.Exists(path) ? Assembly.LoadFrom(path) : null;
         };
-        try { return arguments.Length==2 && arguments[0]=="--fit-job" ? Engine.RunFitChild(arguments[1]) : Run(); } catch(Exception e) { Engine.FailFitChild(e);Console.Error.WriteLine(e.ToString()); return 1; }
+        try {
+            if(arguments.Length==3&&arguments[0]=="--live-anchor")return ApplicationAnchor.Run(int.Parse(arguments[1]),long.Parse(arguments[2]));
+            return arguments.Length==2 && arguments[0]=="--fit-job" ? Engine.RunFitChild(arguments[1]) : Run();
+        } catch(Exception e) { Engine.FailFitChild(e);Console.Error.WriteLine(e.ToString()); return 1; }
     }
     [MethodImpl(MethodImplOptions.NoInlining)] static int Run() {
         var json = new JavaScriptSerializer { MaxJsonLength=64*1024*1024, RecursionLimit=64 };
@@ -127,10 +130,11 @@ public sealed partial class Engine : IDisposable {
             case "close_processing_project": return CloseProcessingProject(J.Str(a,"project_id"));
             case "list_processing_documents": return Documents.List();
             case "list_document_spectra": return Documents.Spectra(J.Str(a,"document_id"));
-            case "open_processing_document": return Documents.Open(J.Str(a,"path"));
+            case "open_processing_document": throw new Fault("LIVE_OPEN_NOT_VERIFIED","Automatic document opening is disabled after an application lifecycle failure. Open the original manually; no application call was sent.");
             case "attach_document_spectrum": return AttachDocumentSpectrum(a);
-            case "apply_fit_to_document": return ApplyFitToDocument(Session(a));
-            case "save_processing_document": return SaveLiveDocument(J.Str(a,"document_id"),J.Str(a,"path"));
+            case "apply_fit_to_document": if(!ApplicationAnchor.Enabled)throw new Fault("LIVE_APPLY_DISABLED","Live writes were disabled by AVANTAGE_DISABLE_LIVE.");return ApplyFitToDocument(Session(a));
+            case "save_processing_document":
+            case "save_processing_document_existing": if(!ApplicationAnchor.Enabled)throw new Fault("LIVE_SAVE_DISABLED","Live saves were disabled by AVANTAGE_DISABLE_LIVE.");return SaveProcessingDocumentExisting(a);
             case "show_data_file": return AppControl.ShowDataFile(J.Str(a,"path"));
             case "charge_shift": return ChargeShift(Session(a),J.Num(a,"delta_ev"));
             case "set_background": return SetBackground(Session(a),a);
@@ -151,15 +155,15 @@ public sealed partial class Engine : IDisposable {
     object Status(){
         bool tables=VerifiedBuild.ProcessingSupported();
         bool projectSave=tables&&ProjectPersistence.GridReferencesVerified;
-        bool live=projectSave&&VerifiedBuild.InteractiveSupported();
+        bool live=projectSave&&VerifiedBuild.InteractiveSupported()&&ApplicationAnchor.Enabled;
         bool solver=tables&&Hash(Path.Combine(Program.InstallRoot,"bin","PeakFitting.dll"))==NativeSolver.SupportedSha256;
         var capabilities=new List<string>{"native_vgd_read","native_vgd_save_copy","csv_json_export","charge_shift","application_status","show_data_file_request","native_backgrounds","native_peak_parameters","native_peak_constraints","native_model_curves","fit_model_json_roundtrip","model_curve_export"};
         if(tables)capabilities.AddRange(new[]{"native_vgt_export","native_vgt_inspect","native_vgt_import"});
         if(solver)capabilities.Add("native_peak_fit");
         if(tables)capabilities.Add("native_vgp_read");
         if(projectSave)capabilities.Add("native_vgp_save_model");
-        if(live)capabilities.AddRange(new[]{"live_document_read","live_document_open","live_model_apply","live_document_save_copy"});
-        return J.Obj("server_version","1.1.0","architecture",Environment.Is64BitProcess?"x64":"x86","avantage_home",Program.InstallRoot,"avantage_version",FileVersionInfo.GetVersionInfo(Path.Combine(Program.InstallRoot,"bin","Avantage.exe")).FileVersion,"open_sessions",sessions.Count,"application",AppControl.Status(),"backend","Avantage native COM","native_fit_solver_verified",solver,"private_table_abi_supported",tables,"native_project_save_verified",projectSave,"native_live_document_bridge_verified",live,"fit_host","one isolated native child per fit","capabilities",capabilities);
+        if(live)capabilities.AddRange(new[]{"live_document_read","live_document_apply_existing_parameters","live_document_save_original"});
+        return J.Obj("server_version","1.3.0","architecture",Environment.Is64BitProcess?"x64":"x86","avantage_home",Program.InstallRoot,"avantage_version",FileVersionInfo.GetVersionInfo(Path.Combine(Program.InstallRoot,"bin","Avantage.exe")).FileVersion,"open_sessions",sessions.Count,"application",AppControl.Status(),"backend","Avantage native COM","native_fit_solver_verified",solver,"private_table_abi_supported",tables,"native_project_save_verified",projectSave,"native_live_document_bridge_verified",live,"native_document_lifecycle_verified",live,"fit_host","one isolated native child per fit","capabilities",capabilities);
     }
     object ChargeShift(SpectrumSession s,double delta){
         if(s.FitState!=null||s.BackgroundState!=null)throw new Fault("MODEL_ALREADY_DEFINED","Apply energy calibration before defining a background or fit model, or reopen a spectrum.");

@@ -1,94 +1,66 @@
+
 using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Linq;
+using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
-
+using System.Threading;
+using System.Linq;
 namespace AvantageMcp {
 public sealed partial class Engine {
-    object SaveLiveDocument(string id,string path) {
-        path=Path.GetFullPath(path);
-        if(!String.Equals(Path.GetExtension(path),".vgp",StringComparison.OrdinalIgnoreCase))throw new Fault("INVALID_PATH","Choose a new .VGP file for the complete processing document. Use save_spectrum for a standalone VGD.");
-        string companion=Path.ChangeExtension(path,".DATA");
-        if(File.Exists(path)||Directory.Exists(path)||File.Exists(companion)||Directory.Exists(companion))throw new Fault("FILE_EXISTS","The new VGP and its companion DATA path must not exist.");
-        if(!Directory.Exists(Path.GetDirectoryName(path)))throw new Fault("DIRECTORY_NOT_FOUND","Create the output directory first.");
-        var document=Documents.Find(id);
-        var pointers=ProcessingCom.EnumerateData(document.Pointer);
-        List<Dictionary<string,object>> before;
-        try{before=CaptureLiveDocument(document,pointers);}
-        finally{foreach(var p in pointers)Marshal.Release(p);}
-        InvalidateLiveLinks(id);
-        string folder=Path.Combine(workRoot,"document-save-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(folder);
-        string checkpoint=Path.Combine(folder,"checkpoint.vgp");
-        // Capture a private checkpoint, rebase its complete owned graph and open
-        // the verified final copy in a fresh document/view.
-        Documents.SaveCopy(id,checkpoint);Trace("live.save.checkpoint.done");
-        NativeProcessingProject source=null,verification=null;
-        string staging=Path.Combine(Path.GetDirectoryName(path),".avantage-document-"+Guid.NewGuid().ToString("N"));
-        bool companionPublished=false,metadataPublished=false;
-        try {
-            var opened=(Dictionary<string,object>)OpenProcessingProject(checkpoint);
-            source=ProcessingProject((string)opened["project_id"]);VerifyCompleteSnapshot(source,before);
-            var originalGrid=ProjectGridValidation.Capture(source.WorkingPath);VerifyGridVisibility(originalGrid,before);
-            var originalPrimaries=ProjectPersistence.PrimarySnapshots(source);
-            Directory.CreateDirectory(staging);
-            string staged=Path.Combine(staging,Path.GetFileName(path)),stagedCompanion=Path.Combine(staging,Path.GetFileName(companion));
-            ProjectPersistence.CopyShared(source.WorkingPath,staged);Directory.CreateDirectory(stagedCompanion);
-            var hashes=Directory.EnumerateFiles(source.CompanionDirectory,"*",SearchOption.AllDirectories).ToDictionary(file=>file,ProjectPersistence.HashShared);
-            foreach(var item in hashes) {
-                string target=Path.Combine(stagedCompanion,item.Key.Substring(source.CompanionDirectory.Length+1));
-                Directory.CreateDirectory(Path.GetDirectoryName(target));ProjectPersistence.CopyShared(item.Key,target);
-                if(ProjectPersistence.HashShared(target)!=item.Value)throw new Fault("SAVE_NOT_VERIFIED","A companion spectrum changed during save.");
-            }
-            ProjectPersistence.RebaseCompanion(source.Document,source.CompanionDirectory,Path.GetFileName(companion));
-            ProjectPersistence.SaveComplete(source.Document,staged);
-            if(!NativePeakTablePersistence.Equivalent(originalGrid,ProjectGridValidation.Capture(staged)))throw new Fault("SAVE_NOT_VERIFIED","The saved grid/data mapping changed.");
-            foreach(string stream in new[]{"Contents","Grid Cells/Contents","Grid Cells/XRefs"})
-                if(!ProjectPersistence.ReadStream(source.WorkingPath,stream.Split('/')).SequenceEqual(ProjectPersistence.ReadStream(staged,stream.Split('/'))))
-                    throw new Fault("SAVE_NOT_VERIFIED","The saved project changed its grid layout.");
-            opened=(Dictionary<string,object>)OpenProcessingProject(staged);
-            verification=ProcessingProject((string)opened["project_id"]);VerifyCompleteSnapshot(verification,before);
-            var verifiedPrimaries=ProjectPersistence.PrimarySnapshots(verification);
-            if(originalPrimaries.Count!=verifiedPrimaries.Count||originalPrimaries.Any(pair=>!verifiedPrimaries.ContainsKey(pair.Key)||!NativePeakTablePersistence.Equivalent(pair.Value,verifiedPrimaries[pair.Key])))throw new Fault("SAVE_NOT_VERIFIED","The saved project changed primary peak metadata.");
-            Directory.CreateDirectory(companion);companionPublished=true;
-            foreach(var item in hashes) {
-                string relative=item.Key.Substring(source.CompanionDirectory.Length+1),target=Path.Combine(companion,relative);
-                Directory.CreateDirectory(Path.GetDirectoryName(target));ProjectPersistence.CopyShared(Path.Combine(stagedCompanion,relative),target);
-                if(ProjectPersistence.HashShared(target)!=item.Value)throw new Fault("SAVE_NOT_VERIFIED","A published companion spectrum changed.");
-            }
-            ProjectPersistence.CopyShared(staged,path);metadataPublished=true;Trace("live.save.published");
-            Documents.Open(path);
-            document=Documents.FindPath(path);pointers=ProcessingCom.EnumerateData(document.Pointer);
-            try{if(!NativePeakTablePersistence.PersistedEquivalent(before,CaptureLiveDocument(document,pointers)))throw new Fault("LIVE_DISPLAY_NOT_VERIFIED","The saved project exists but its application readback differs: "+path);}
-            finally{foreach(var p in pointers)Marshal.Release(p);}
-            return J.Obj("document",document.Info(),"path",path,"bytes",new FileInfo(path).Length,"companion_data_directory",companion,
-                "checkpoint_path",checkpoint,"roundtrip_verified",true,"live_readback_verified",true,"raw_data_verified",true,
-                "all_spectrum_models_verified",true,"primary_metadata_preserved",true,"grid_layout_preserved",true,"grid_bindings_verified",true,
-                "note","Avantage displays the complete verified saved copy. Reattach a spectrum before further live edits.");
-        }catch {
-            // A published VGP is retained even if application display fails.
-            // Partial unpublished companions are kept for diagnosis; no user
-            // files or directories are recursively removed on a failure path.
-            if(companionPublished&&!metadataPublished)Console.Error.WriteLine("Incomplete new companion directory retained: "+companion);
-            throw;
-        }finally {
-            if(verification!=null){verification.Dispose();projects.Remove(verification.Id);}
-            if(source!=null){source.Dispose();projects.Remove(source.Id);}
-            string stagingParent=Path.GetDirectoryName(Path.GetFullPath(staging));
-            if(String.Equals(stagingParent,Path.GetDirectoryName(path),StringComparison.OrdinalIgnoreCase))
-                try{if(Directory.Exists(staging))Directory.Delete(staging,true);}catch(IOException){}catch(UnauthorizedAccessException){}
+    static bool SameDocumentSet(Dictionary<string,object> before,Dictionary<string,object> after){
+        Func<Dictionary<string,object>,string[]> keys = value => ((System.Collections.IEnumerable)value["documents"]).Cast<Dictionary<string,object>>().Select(d=>J.Str(d,"document_id")+"|"+J.Str(d,"path")).OrderBy(k=>k).ToArray();
+        return keys(before).SequenceEqual(keys(after));
+    }
+    static void VerifyCompleteSnapshot(NativeProcessingProject project,IList<Dictionary<string,object>> expected){
+        if(project.Spectra.Count!=expected.Count)throw new Fault("SAVE_NOT_VERIFIED","Saved spectrum count differs.");
+        for(int i=0;i<expected.Count;i++){
+            var peaks=project.Document.PeaksFor(project.Spectra[i].Data);
+            try{if(!NativePeakTablePersistence.Equivalent(expected[i]["data"],NativeSnapshot.Fingerprint(project.Spectra[i].Data))||!NativePeakTablePersistence.PersistedEquivalent(expected[i]["model"],NativePeakTablePersistence.ReadPeaks(peaks)))throw new Fault("SAVE_NOT_VERIFIED","Saved raw/model differs at spectrum "+i);}
+            finally{ProcessingCom.ReleasePeaks(peaks);}
         }
     }
-    static void VerifyCompleteSnapshot(NativeProcessingProject project,IList<Dictionary<string,object>> expected) {
-        if(project.Spectra.Count!=expected.Count)throw new Fault("SAVE_NOT_VERIFIED","The saved document has a different number of spectra.");
-        for(int i=0;i<project.Spectra.Count;i++) {
-            var peaks=project.Document.PeaksFor(project.Spectra[i].Data);
-            try {
-                if(!NativePeakTablePersistence.Equivalent(expected[i]["data"],NativeSnapshot.Fingerprint(project.Spectra[i].Data))||
-                   !NativePeakTablePersistence.PersistedEquivalent(expected[i]["model"],NativePeakTablePersistence.ReadPeaks(peaks)))
-                    throw new Fault("SAVE_NOT_VERIFIED","The saved document differs from spectrum "+i+".");
-            }finally{ProcessingCom.ReleasePeaks(peaks);}
-        }
+    [DllImport("user32.dll",SetLastError=true)]static extern bool PostMessage(IntPtr window,uint message,IntPtr wparam,IntPtr lparam);
+    object SaveProcessingDocumentExisting(Dictionary<string,object> args){
+        var doc=Documents.Find(J.Str(args,"document_id"));
+        string fixture=doc.PathName, requested=System.IO.Path.GetFullPath(J.Str(args,"path"));
+        if(String.IsNullOrWhiteSpace(fixture)||!System.IO.File.Exists(fixture)||!String.Equals(System.IO.Path.GetFullPath(fixture),requested,StringComparison.OrdinalIgnoreCase))throw new Fault("ORIGINAL_PATH_REQUIRED","Save only this existing document's own original path. No command sent.");
+        var initialDocuments=(Dictionary<string,object>)Documents.List();
+        Documents.Activate(doc);
+        var processes=Process.GetProcessesByName("Avantage");
+        IntPtr hwnd=IntPtr.Zero;int appId;
+        try{if(processes.Length!=1||!processes[0].Responding)throw new Fault("APP_NOT_READY","One responding application is required.");hwnd=processes[0].MainWindowHandle;appId=processes[0].Id;}finally{foreach(var p in processes)p.Dispose();}
+        if(hwnd==IntPtr.Zero)throw new Fault("NO_MAIN_WINDOW","No application command was sent.");
+        var data=ProcessingCom.EnumerateData(doc.Pointer);
+        try{
+            var before=CaptureLiveDocument(doc,data);foreach(var pointer in data)Marshal.Release(pointer);data.Clear();
+            int initialModified;Marshal.ThrowExceptionForHR(ProcessingCom.At<ProcessingCom.GetInt>(doc.Pointer,9)(doc.Pointer,out initialModified));
+            // Asynchronous normal File > Save. Never call IProcessingDocument.SaveDocument:
+            // that route clears the MFC path and takes a different storage lifecycle.
+            // No UI activation, keyboard injection, nested SendMessage or automatic retry.
+            // An already saved document needs full disk verification, not another
+            // command. A dirty-to-clean transition is valid even if serialization
+            // produces identical bytes (e.g. a user reverted their last edit).
+            if(initialModified!=0&&!PostMessage(hwnd,0x111,new IntPtr(0xE103),IntPtr.Zero))throw new Win32Exception(Marshal.GetLastWin32Error());
+            var timer=Stopwatch.StartNew();bool completed=initialModified==0;
+            while(!completed&&timer.ElapsedMilliseconds<30000){
+                Thread.Sleep(150);
+                if(!String.Equals(doc.PathName,fixture,StringComparison.OrdinalIgnoreCase))throw new Fault("SAVE_PATH_CHANGED","The document changed path; inspect the test window before retrying.");
+                int modified;Marshal.ThrowExceptionForHR(ProcessingCom.At<ProcessingCom.GetInt>(doc.Pointer,9)(doc.Pointer,out modified));
+                if(modified==0){completed=true;break;}
+            }
+            if(!completed)throw new Fault("MENU_SAVE_TIMEOUT","Ordinary Save did not verify within 30 seconds. No retry was sent.");
+            data=ProcessingCom.EnumerateData(doc.Pointer);var after=CaptureLiveDocument(doc,data);
+            if(!NativePeakTablePersistence.PersistedEquivalent(before,after))throw new Fault("LIVE_MODEL_CHANGED_DURING_SAVE","Live data/model changed during ordinary Save.");
+            string privateId=null;
+            try{
+                var opened=(Dictionary<string,object>)OpenProcessingProject(fixture);privateId=J.Str(opened,"project_id");var project=ProcessingProject(privateId);
+                VerifyCompleteSnapshot(project,before);VerifyGridVisibility(ProjectGridValidation.Capture(project.WorkingPath),before);
+            }finally{if(privateId!=null)CloseProcessingProject(privateId);}
+            if(!SameDocumentSet(initialDocuments,(Dictionary<string,object>)Documents.List()))throw new Fault("DOCUMENT_SET_CHANGED","The open document set or modified state changed unexpectedly during Save.");
+            InvalidateLiveLinks(doc.Id);
+            return J.Obj("document",doc.Info(),"roundtrip_verified",true,"raw_data_verified",true,"all_spectrum_models_verified",true,"grid_bindings_verified",true,"no_extra_windows_verified",true,"same_window_retained",true,"saved_state_verified",true,"live_readback_verified",true,"normal_menu_save_sent",initialModified!=0,"already_saved",initialModified==0,"application_process_id",appId,"saved_file_sha256",ProjectPersistence.HashShared(fixture),"note","Complete saved project raw/model/grid readback verified in an isolated project snapshot.");
+        }finally{foreach(var p in data)Marshal.Release(p);}
     }
 }
 }

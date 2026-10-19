@@ -16,8 +16,10 @@ import subprocess
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from typing import Any, Sequence
 from uuid import uuid4
+from .operation_lock import LIVE_OPERATIONS, live_transaction
 
 
 class BridgeError(RuntimeError):
@@ -81,6 +83,12 @@ class BridgeClient:
     @property
     def stderr_tail(self) -> str:
         return "".join(list(self._stderr))[-8192:]
+
+    @contextmanager
+    def exclusive(self):
+        """Serialize a composite operation against other calls on this client."""
+        with self._lock:
+            yield
 
     @property
     def pid(self) -> int | None:
@@ -209,6 +217,12 @@ class BridgeClient:
         })
 
     def call(self, operation: str, arguments: dict[str, Any] | None = None) -> Any:
+        if operation in LIVE_OPERATIONS:
+            with live_transaction():
+                return self._call_serialized(operation,arguments)
+        return self._call_serialized(operation,arguments)
+
+    def _call_serialized(self, operation: str, arguments: dict[str, Any] | None = None) -> Any:
         """Perform exactly one native operation; timeout includes worker response.
 
         Requests are never retried automatically because mutations may have
@@ -325,7 +339,7 @@ class BridgeClient:
                 self._known_projects.discard(project_id)
             if operation in {
                 "list_processing_documents", "open_processing_document", "list_document_spectra",
-                "save_processing_document",
+                "save_processing_document", "save_processing_document_existing",
             } and isinstance(result, dict):
                 documents = result.get("documents", [])
                 if isinstance(result.get("document"), dict):
