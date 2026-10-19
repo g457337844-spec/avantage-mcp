@@ -17,8 +17,11 @@ public sealed partial class Engine {
     static void WriteLiveParameterValues(IList<IAvFittedPeak> peaks,IList<Dictionary<string,object>> values) {
         for(int i=0;i<peaks.Count;i++){
             var p=values[i];var peak=peaks[i];
+            // Select the method before restoring the complete parameter tuple.
+            int method;peak.GetGLCombineMethod(out method);int desired=J.Int(p,"native_gl_combine_method",0);
+            if(method!=desired)peak.SetGLCombineMethod(desired);
             peak.SetAsymParams(J.Num(p,"area"),J.Num(p,"area_ratio"),J.Num(p,"centre_kinetic_ev"),J.Num(p,"height"),J.Num(p,"height_ratio"),J.Num(p,"fwhm_ev"),J.Num(p,"gaussian_lorentz"),J.Num(p,"tail_mix"),J.Num(p,"tail_height"),J.Num(p,"tail_exponential"));
-            peak.SetName(J.Str(p,"label"));peak.SetGLCombineMethod(J.Int(p,"native_gl_combine_method",0));
+            peak.SetName(J.Str(p,"label"));
         }
         for(int i=0;i<peaks.Count;i++)foreach(var spec in (IEnumerable<Dictionary<string,object>>)values[i]["constraints"]){
             IntPtr raw=IntPtr.Zero,reference=IntPtr.Zero;IAvPeakConstraint constraint=null;
@@ -35,6 +38,33 @@ public sealed partial class Engine {
     }
     static void RefreshLiveParameters(ProcessingDocument doc) {
         IntPtr grid=doc.Grid();try{Marshal.ThrowExceptionForHR(ProcessingCom.At<ProcessingCom.DeferredEvent>(grid,76)(grid,0));ProcessingCom.CheckDeferred(grid);}finally{Marshal.Release(grid);}
+    }
+    static bool CanCanonicalizeFreeArea(Dictionary<string,object> expected,Dictionary<string,object> actual) {
+        var constraints=(IEnumerable<Dictionary<string,object>>)expected["constraints"];
+        var area=constraints.FirstOrDefault(c=>J.Int(c,"attribute",0)==1);
+        // The native simplex and grid use slightly different numerical area
+        // integration. Only a free, range-constrained derived area may be
+        // canonicalized. Every curve parameter and constraint stays exact.
+        if(area==null||J.Int(area,"type",0)!=6)return false;
+        double oldArea=J.Num(expected,"area"),newArea=Convert.ToDouble(actual["area"]);
+        if(Double.IsNaN(newArea)||Double.IsInfinity(newArea)||oldArea<=0||newArea<J.Num(area,"value1")||newArea>J.Num(area,"value2")||Math.Abs(newArea-oldArea)>5e-5*oldArea)return false;
+        var comparison=new Dictionary<string,object>(actual);comparison["area"]=oldArea;
+        return NativePeakTablePersistence.PersistedEquivalent(expected,comparison);
+    }
+    static int CanonicalizeFreeAreas(NativePeakModel model,IList<Dictionary<string,object>> expected,IList<Dictionary<string,object>> actual) {
+        if(expected.Count!=actual.Count)return 0;
+        var updates=new List<int>();
+        for(int i=0;i<expected.Count;i++){
+            if(NativePeakTablePersistence.PersistedEquivalent(expected[i],actual[i]))continue;
+            if(!CanCanonicalizeFreeArea(expected[i],actual[i]))return 0;
+            updates.Add(i);
+        }
+        foreach(int i in updates){
+            var p=actual[i];
+            model.Peaks[i].Native.SetAsymParams(J.Num(p,"area"),J.Num(p,"area_ratio"),J.Num(p,"centre_kinetic_ev"),J.Num(p,"height"),J.Num(p,"height_ratio"),J.Num(p,"fwhm_ev"),J.Num(p,"gaussian_lorentz"),J.Num(p,"tail_mix"),J.Num(p,"tail_height"),J.Num(p,"tail_exponential"));
+            expected[i]["area"]=p["area"];
+        }
+        return updates.Count;
     }
     object ApplyLiveParameters(SpectrumSession session) {
         if(session.LiveLink==null)throw new Fault("LIVE_SESSION_REQUIRED","Attach the original document spectrum first.");
@@ -53,11 +83,24 @@ public sealed partial class Engine {
             var expected=NativePeakTablePersistence.ReadPeaks(model.Peaks.Select(p=>p.Native).ToArray());
             ValidateLiveParameterUpdate(previous,expected);
             int wasModified;Marshal.ThrowExceptionForHR(ProcessingCom.At<ProcessingCom.GetInt>(doc.Pointer,9)(doc.Pointer,out wasModified));
+            int canonicalized=0;
             try{
                 WriteLiveParameterValues(remote,expected);
                 Marshal.ThrowExceptionForHR(ProcessingCom.At<ProcessingCom.SetInt>(doc.Pointer,8)(doc.Pointer,1));RefreshLiveParameters(doc);
                 var actual=CaptureLiveDocument(doc,data);
-                for(int i=0;i<actual.Count;i++)if(!NativePeakTablePersistence.Equivalent(before[i]["data"],actual[i]["data"])||!Equals(before[i]["visible_in_grid"],actual[i]["visible_in_grid"])||!NativePeakTablePersistence.PersistedEquivalent(i==link.Index?(object)expected:before[i]["model"],actual[i]["model"]))throw new Fault("LIVE_APPLY_NOT_VERIFIED","The original window did not retain the intended parameters.");
+                canonicalized=CanonicalizeFreeAreas(model,expected,(IList<Dictionary<string,object>>)actual[link.Index]["model"]);
+                if(canonicalized>0){
+                    // A second refresh must be stable at the original strict
+                    // tolerance; canonicalization cannot mask continuing drift.
+                    RefreshLiveParameters(doc);actual=CaptureLiveDocument(doc,data);
+                    if(!NativePeakTablePersistence.PersistedEquivalent(expected,NativePeakTablePersistence.ReadPeaks(model.Peaks.Select(p=>p.Native).ToArray())))throw new Fault("LIVE_AREA_CANONICALIZATION_FAILED","The private candidate did not retain the grid's derived areas.");
+                }
+                for(int i=0;i<actual.Count;i++)if(!NativePeakTablePersistence.Equivalent(before[i]["data"],actual[i]["data"])||!Equals(before[i]["visible_in_grid"],actual[i]["visible_in_grid"])||!NativePeakTablePersistence.PersistedEquivalent(i==link.Index?(object)expected:before[i]["model"],actual[i]["model"])){
+                    string diagnostic=System.IO.Path.Combine(session.DirectoryPath,"live-apply-readback.json");
+                    var json=new System.Web.Script.Serialization.JavaScriptSerializer{MaxJsonLength=16*1024*1024,RecursionLimit=64};
+                    System.IO.File.WriteAllText(diagnostic,json.Serialize(J.Obj("spectrum_index",i,"expected",i==link.Index?(object)expected:before[i]["model"],"actual",actual[i]["model"])),new System.Text.UTF8Encoding(false));
+                    throw new Fault("LIVE_APPLY_NOT_VERIFIED","The original window did not retain the intended parameters. Readback diagnostic: "+diagnostic);
+                }
                 link.OriginalModelFingerprint=ObjectFingerprint(actual[link.Index]["model"]);
             }catch{
                 WriteLiveParameterValues(remote,previous);Marshal.ThrowExceptionForHR(ProcessingCom.At<ProcessingCom.SetInt>(doc.Pointer,8)(doc.Pointer,wasModified));RefreshLiveParameters(doc);
@@ -65,7 +108,7 @@ public sealed partial class Engine {
                 throw;
             }
             link.Applied=true;session.Dirty=false;
-            return J.Obj("session_id",session.Id,"document",doc.Info(),"spectrum_index",link.Index,"peak_count",remote.Count,"live_readback_verified",true,"saved_project_verified",false,"raw_data_verified",true,"unrelated_spectra_verified",true,"grid_bindings_verified",true,"same_window_updated",true,"no_extra_windows_verified",true,"note","Existing application-owned peak and constraint parameters updated in the original window; save explicitly or use the default backed-up original save.");
+            return J.Obj("session_id",session.Id,"document",doc.Info(),"spectrum_index",link.Index,"peak_count",remote.Count,"live_readback_verified",true,"saved_project_verified",false,"raw_data_verified",true,"unrelated_spectra_verified",true,"grid_bindings_verified",true,"same_window_updated",true,"no_extra_windows_verified",true,"derived_free_areas_canonicalized",canonicalized,"derived_area_relative_limit",5e-5,"note","Existing application-owned peak and constraint parameters updated in the original window; save explicitly or use the default backed-up original save.");
         }finally{if(remote!=null)ProcessingCom.ReleasePeaks(remote);foreach(var pointer in data)Marshal.Release(pointer);}
     }
 }
