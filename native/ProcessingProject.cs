@@ -250,7 +250,12 @@ public sealed partial class Engine {
     // Rebuild locally from native snapshots. Native constraints are attached only after the
     // common background, because SetBackground resets native constraints in Avantage.
     void ImportNativeSnapshots(SpectrumSession s,List<Dictionary<string,object>> saved) {
-        if(saved.Count==0)return;if(saved.Count>100)throw new Fault("MODEL_SIZE","A spectrum may contain at most 100 fitted peaks.");
+        // An empty original model still needs a live FitState: attaching to a
+        // spectrum that has no peaks yet must leave the session ready for
+        // add_peak, and apply_fit_to_document must be able to detect the
+        // topology change instead of dereferencing a missing model.
+        if(saved.Count==0){if(s.FitState==null)s.FitState=new NativePeakModel(s.Data);return;}
+        if(saved.Count>100)throw new Fault("MODEL_SIZE","A spectrum may contain at most 100 fitted peaks.");
         var bgSaved=saved[0]["background"] as Dictionary<string,object>;
         if(bgSaved==null||saved.Any(p=>!NativePeakTablePersistence.Equivalent(p["background"],bgSaved)))throw new Fault("MIXED_BACKGROUNDS","This spectrum must have one common native background for conversational model edits.");
         int kind=J.Int(bgSaved,"type",-1);if(kind<0||kind>4)throw new Fault("UNSUPPORTED_BACKGROUND","Unsupported native background type.");

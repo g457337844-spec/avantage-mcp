@@ -13,18 +13,155 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
+from . import __version__, workspace
 from .bridge_client import BridgeClient, BridgeError
 from .project_writeback import apply_document_model, save_document_in_place, save_project_model_in_place
 from .schemas import (
     BackgroundKind, ConstraintSpec, EndpointAverage, EnergyShift, ExportFormat,
     DocumentId, FilePath, Finite, FitIterations, FitTimeout, Nonnegative, Offset, PageSize, PeakAttribute, PeakId, PeakPatch, PeakSpec,
     Positive, ProjectId, SessionId, ShirleyIterations, SpectrumIndex, TougaardType,
+    BackupDays, PageLimit, StaleHours,
 )
 
 
 READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 SESSION = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
 WRITE = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=False)
+HOUSEKEEPING = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False)
+
+
+#: Remediation appended to a native error so the caller learns what to do next.
+#: Keyed by codes the bridge and the writeback layer actually emit.
+ERROR_HINTS: dict[str, str] = {
+    "SESSION_NOT_FOUND": "Reopen the spectrum or reattach the document; session ids do not survive a bridge restart.",
+    "SESSION_INVALIDATED": "Reopen the spectrum or reattach the document before continuing.",
+    "PROJECT_INVALIDATED": "Reopen the VGP with avantage_open_processing_project.",
+    "DOCUMENT_INVALIDATED": "Call avantage_list_processing_documents, then attach the spectrum again.",
+    "SESSION_LIMIT": "Close unused sessions with avantage_list_sessions and avantage_close_session.",
+    "LIVE_OPERATION_BUSY": "Another MCP process holds the Avantage transaction. Wait for it to finish; do not auto-retry a write.",
+    "APP_MODAL_OR_STARTING": "Close the modal dialog or wait for Avantage to finish starting, then repeat the read.",
+    "APP_NOT_RESPONDING": "Avantage is hung. Restore the application manually; no request was sent.",
+    "LIVE_DOCUMENT_BRIDGE_NOT_VERIFIED": "This build cannot drive live documents. Use a private VGD session or a VGP project snapshot.",
+    "PROJECT_SAVE_NOT_VERIFIED": "Complete VGP saving is unavailable for this build; export a VGT or a JSON recipe instead.",
+    "DOCUMENT_LIFECYCLE_NOT_VERIFIED": "The bridge cannot save the original window safely; save a copy with avantage_save_spectrum.",
+    "ORIGINAL_IN_USE": "Close the original document in Avantage without saving, then repeat the writeback.",
+    "ORIGINAL_PATH_REQUIRED": "The session points at a private intermediate. Reattach the original VGP first.",
+    "ORIGINAL_CHANGED": "The original file changed underneath the operation. Inspect it before retrying.",
+    "ORIGINAL_SAVE_UNVERIFIED": "The save did not verify. Inspect the original and the retained backup before retrying.",
+    "SOURCE_PROTECTED": "Choose a different destination; open sources and working copies cannot be overwritten.",
+    "FILE_EXISTS": "Choose a new name or pass overwrite=true explicitly.",
+    "MODEL_ALREADY_DEFINED": "Clear the peak model before changing the background, or clear both before charge_shift.",
+    "BACKGROUND_REQUIRED": "Call avantage_set_background before avantage_run_fit.",
+    "PEAKS_REQUIRED": "Call avantage_add_peak at least once before avantage_run_fit.",
+    "SPECTRUM_NOT_FOUND": "Use an index returned by the matching list tool.",
+    "UNSUPPORTED_BUILD": "The installed Avantage build is not one this bridge was verified against.",
+    "NATIVE_FIT_TIMEOUT": "The fit exceeded its own timeout. The model was retained; retry with a longer timeout_seconds.",
+    "NATIVE_FIT_CRASH": "The isolated fit host failed. The model was retained; inspect stderr in the details.",
+    "BRIDGE_TIMEOUT": "The native worker exceeded its timeout; the outcome is unknown. Inspect any destination file before retrying.",
+    "BRIDGE_EXITED": "The native worker exited. Reopen projects, spectra and documents.",
+    "BRIDGE_START_FAILED": "The native bridge could not start. Check AVANTAGE_BRIDGE_PATH.",
+    "CLIENT_CLOSED": "The server is shutting down; reconnect before issuing more calls.",
+}
+
+
+def with_hint(code: str, message: str) -> str:
+    """Append the remediation for ``code`` when one is known."""
+    hint = ERROR_HINTS.get(code)
+    if not hint or hint in message:
+        return message
+    return f"{message} Next: {hint}"
+
+
+#: Capability string -> the tool family it unlocks. Used to explain a status.
+CAPABILITY_MEANING: dict[str, str] = {
+    "native_peak_fit": "avantage_run_fit works",
+    "native_vgp_save_model": "avantage_save_project_model can replace an original VGP",
+    "native_vgp_read": "avantage_open_processing_project works",
+    "native_vgt_export": "avantage_export_peak_table works",
+    "native_vgt_import": "avantage_import_peak_table works",
+    "native_vgt_inspect": "avantage_inspect_peak_table works",
+    "live_document_read": "avantage_list_processing_documents and attach work",
+    "live_document_apply_existing_parameters": "avantage_apply_fit_to_document works",
+    "live_document_save_original": "original-window saving works",
+}
+
+
+def decorate_status(status: dict[str, Any]) -> dict[str, Any]:
+    """Make the actionable capabilities explicit instead of burying them.
+
+    The native payload reports `application.connected`, which only covers the
+    legacy acquisition-automation interface and reads false on a healthy
+    interactive installation. Surface the flags that actually gate tool use.
+    """
+    result = dict(status)
+    result["native_bridge_version"] = result.get("server_version")
+    result["server_version"] = __version__
+    capabilities = result.get("capabilities")
+    if isinstance(capabilities, list):
+        result["capability_meaning"] = {
+            name: CAPABILITY_MEANING[name] for name in capabilities if name in CAPABILITY_MEANING
+        }
+    application = result.get("application")
+    if isinstance(application, dict):
+        legacy = dict(application)
+        legacy["note"] = (
+            "Legacy acquisition-automation interface only. A false `connected` here does not "
+            "disable live document processing; use live_processing_available instead."
+        )
+        result["legacy_acquisition_automation"] = legacy
+        del result["application"]
+    result["live_processing_supported"] = bool(
+        result.get("native_live_document_bridge_verified")
+        and result.get("native_document_lifecycle_verified")
+    )
+    # A process that exists is not an interface that answers. The native layer
+    # reports `running` from the process list and `responding` from a window
+    # message probe; both are kept here, and an explicit false always wins.
+    result["application_running"] = isinstance(application, dict) and application.get("running") is True
+    result["application_responding"] = (
+        None if not isinstance(application, dict) else application.get("responding")
+    )
+    responding = result["application_responding"]
+    if not result["application_running"]:
+        # No process: answering state is moot, whatever the payload said.
+        result["application_response_state"] = "not_running"
+    elif responding is True:
+        result["application_response_state"] = "responding"
+    elif responding is False:
+        # An explicit false from the window probe is a measured answer.
+        result["application_response_state"] = "not_responding"
+    else:
+        # Missing or non-boolean answering state is unknown, never assumed live.
+        result["application_response_state"] = "unknown"
+    result["live_processing_available"] = bool(
+        result["live_processing_supported"] and result["application_response_state"] == "responding"
+    )
+    result["native_fitting_available"] = bool(result.get("native_fit_solver_verified"))
+    if result["live_processing_available"]:
+        result["recommended_next_step"] = (
+            "Live document tools are available. Call avantage_list_processing_documents to see open projects."
+        )
+    elif not result["live_processing_supported"]:
+        result["recommended_next_step"] = (
+            "Live document tools are unavailable. Open a .VGD or .VGP as a private session instead."
+        )
+    elif result["application_response_state"] == "not_running":
+        result["recommended_next_step"] = (
+            "Start Avantage and open the desired project, then list processing documents."
+        )
+    elif result["application_response_state"] == "not_responding":
+        result["recommended_next_step"] = (
+            "Avantage is running but not answering. Restore the application manually (close any modal "
+            "dialog or wait for startup to finish), then repeat avantage_status; live document tools are "
+            "not claimed available until it responds."
+        )
+    else:
+        result["recommended_next_step"] = (
+            "The running Avantage process did not report whether it is answering, so live document tools "
+            "are not claimed available. Repeat avantage_status; if the answer stays unknown, use a private "
+            ".VGD session or .VGP snapshot instead."
+        )
+    return result
 
 
 def create_server(bridge: BridgeClient | None = None) -> FastMCP:
@@ -42,11 +179,29 @@ def create_server(bridge: BridgeClient | None = None) -> FastMCP:
         "Avantage MCP",
         instructions=(
             "Control the installed Thermo Scientific Avantage spectrum processing components. "
-            "Use avantage_status first. For VGP, open a processing project, list spectra and open a selected spectrum; for VGD, open a spectrum directly. "
-            "Save private VGP model edits to the original path by omitting the save path, with mandatory complete backups and no new application windows. Close that original document before replacing its bundle. "
-            "For an already-open original, attach its spectrum, edit existing peak parameters/constraints, then apply_fit_to_document; by default this saves with a full backup and retains that same window. Reattach after saving. Automatic opening and closing remain disabled. "
-            "Use absolute Windows paths. After a bridge restart, reopen projects and spectra and relist application documents. "
-            "Live document operations require explicit verified native capabilities; a private session edit alone does not update the visible application. "
+            "Use absolute Windows paths throughout.\n"
+            "\n"
+            "RECOMMENDED ORDER (follow it unless the user asks for a specific step):\n"
+            "1. avantage_status — read the capabilities block before anything else. It states exactly which native features this build may use.\n"
+            "2. Pick a source: avantage_open_spectrum for a standalone .VGD, avantage_open_processing_project plus avantage_open_project_spectrum for a .VGP bundle.\n"
+            "3. avantage_charge_shift, if and only if the user asked for an energy calibration. Do it before any background or peak work.\n"
+            "4. avantage_set_background, then avantage_add_peak for each component, then avantage_set_peak_constraint.\n"
+            "5. avantage_run_fit, then avantage_get_fit_model and avantage_get_model_curve to inspect convergence and residuals.\n"
+            "6. Persist with avantage_save_spectrum, avantage_export_peak_table, avantage_export_model_curves or avantage_save_project_model.\n"
+            "\n"
+            "EDITING AN ALREADY-OPEN PROJECT: avantage_list_processing_documents, avantage_list_document_spectra, "
+            "avantage_attach_document_spectrum, edit the existing peak parameters or constraints, then avantage_apply_fit_to_document. "
+            "Reattach after every save. Live apply keeps the existing peak count, background and constraint attributes; adding, removing or "
+            "replacing those requires the private project flow (avantage_save_project_model) with the original document closed.\n"
+            "\n"
+            "CHECK BEFORE CLAIMING SUCCESS: avantage_status capabilities must contain native_peak_fit before avantage_run_fit, and "
+            "native_vgp_save_model before avantage_save_project_model. A fit that reached max_iterations returns converged=false. "
+            "Transport success never proves a scientifically valid fit; report convergence, stop_reason and residual metrics together.\n"
+            "\n"
+            "HOUSEKEEPING: private working copies accumulate under the session root. Call avantage_workspace_usage to see them and "
+            "avantage_prune_workspace with dry_run=true first. avantage_list_backups enumerates recovery material from earlier saves.\n"
+            "\n"
+            "Automatic opening and closing of application documents remain disabled. "
             "Never infer scientific fit validity from transport success."
         ),
         lifespan=lifespan,
@@ -58,7 +213,22 @@ def create_server(bridge: BridgeClient | None = None) -> FastMCP:
             return await asyncio.to_thread(client.call, operation, arguments)
         except BridgeError as exc:
             details = "" if exc.details is None else " Details: " + json.dumps(exc.details, ensure_ascii=False, default=str)
-            raise ToolError(f"{exc.code}: {exc.message}{details}") from exc
+            raise ToolError(with_hint(exc.code, f"{exc.code}: {exc.message}{details}")) from exc
+
+    async def active_working_paths() -> list[str]:
+        listed = await invoke("list_sessions")
+        if not isinstance(listed, dict) or not isinstance(listed.get("sessions"), list):
+            raise ToolError("WORKSPACE_ACTIVITY_UNKNOWN: Cannot verify active sessions; cleanup was not started.")
+        paths = []
+        for row in listed["sessions"]:
+            if not isinstance(row, dict) or not isinstance(row.get("working_path"), str) or not row["working_path"]:
+                raise ToolError("WORKSPACE_ACTIVITY_UNKNOWN: Invalid active session; cleanup was not started.")
+            paths.append(row["working_path"])
+        return paths
+
+    def fail(exc: BridgeError) -> ToolError:
+        details = "" if exc.details is None else " Details: " + json.dumps(exc.details, ensure_ascii=False, default=str)
+        return ToolError(with_hint(exc.code, str(exc) + details))
 
     async def invoke_live(operation: str, **arguments: Any) -> Any:
         # Do not turn unverified native application entry points into public,
@@ -73,8 +243,22 @@ def create_server(bridge: BridgeClient | None = None) -> FastMCP:
 
     @app.tool(annotations=READ)
     async def avantage_status() -> dict[str, Any]:
-        """Check native bridge, installed Avantage components, and application connection status."""
-        return await invoke("status")
+        """Check native bridge, installed Avantage components, and application connection status.
+
+        Read this first. `live_processing_available` is the flag that decides
+        whether the live document tools work; `application.connected` only
+        reports the legacy acquisition-automation interface and is routinely
+        false while live processing is fully available.
+        `live_processing_available` also requires the Avantage process to be
+        running *and* answering: `application_response_state` is one of
+        `responding`, `not_responding`, `unknown` or `not_running`, and
+        `recommended_next_step` explains what to do in each case.
+        """
+
+        status = await invoke("status")
+        if isinstance(status, dict):
+            status = decorate_status(status)
+        return status
 
     @app.tool(annotations=READ)
     async def avantage_application_status() -> dict[str, Any]:
@@ -160,8 +344,7 @@ def create_server(bridge: BridgeClient | None = None) -> FastMCP:
         try:
             return await asyncio.to_thread(save_project_model_in_place, client, session_id)
         except BridgeError as exc:
-            details = '' if exc.details is None else ' Details: ' + json.dumps(exc.details, ensure_ascii=False, default=str)
-            raise ToolError(str(exc) + details) from exc
+            raise fail(exc) from exc
         except (ValueError, OSError) as exc:
             raise ToolError(str(exc)) from exc
 
@@ -181,8 +364,26 @@ def create_server(bridge: BridgeClient | None = None) -> FastMCP:
 
         Requires verified live integration. Choose the spectrum_index from this
         result when attaching, rather than inferring the currently selected grid.
+        `active_in_grid` marks the spectra currently drawn in the visible
+        processing grid; it is a display flag, not a filter on what can be
+        attached. `visible_in_grid` is kept as an alias for compatibility.
         """
-        return await invoke_live("list_document_spectra", document_id=document_id)
+        result = await invoke_live("list_document_spectra", document_id=document_id)
+        if isinstance(result, dict) and isinstance(result.get("spectra"), list):
+            active = []
+            for row in result["spectra"]:
+                if isinstance(row, dict) and "visible_in_grid" in row:
+                    row["active_in_grid"] = row["visible_in_grid"]
+                    if row["visible_in_grid"]:
+                        active.append(
+                            {"spectrum_index": row.get("spectrum_index"), "name": row.get("name")}
+                        )
+            result["active_spectra"] = active
+            result["active_note"] = (
+                "active_in_grid marks spectra drawn in the visible grid. Any index in "
+                "`spectra` can be attached; attaching does not change what the user sees."
+            )
+        return result
 
     @app.tool(annotations=SESSION)
     async def avantage_open_processing_document(path: FilePath) -> dict[str, Any]:
@@ -198,8 +399,35 @@ def create_server(bridge: BridgeClient | None = None) -> FastMCP:
         Requires verified live integration. Returns session_id with a live link;
         edits stay private until avantage_apply_fit_to_document succeeds. Use
         this attachment rather than a separate VGP/VGD session for live apply.
+        The response echoes which document, index and spectrum name was attached
+        so a mistaken index is visible before any edit is made.
         """
-        return await invoke_live("attach_document_spectrum", document_id=document_id, spectrum_index=spectrum_index)
+        result = await invoke_live("attach_document_spectrum", document_id=document_id, spectrum_index=spectrum_index)
+        if isinstance(result, dict):
+            # Derive the echo from the attach payload alone: an extra native
+            # round-trip here would double every attachment's cost.
+            session = result.get("session") if isinstance(result.get("session"), dict) else {}
+            spectrum = result.get("spectrum") if isinstance(result.get("spectrum"), dict) else {}
+            source_path = session.get("source_path") or spectrum.get("source_path")
+            name = None
+            if isinstance(source_path, str) and source_path:
+                name = source_path.replace("\\", "/").rsplit("/", 1)[-1]
+                if name.lower().endswith(".vgd"):
+                    name = name[:-4]
+            model = result.get("model") if isinstance(result.get("model"), dict) else {}
+            peaks = model.get("peaks")
+            result["attached"] = {
+                "document_id": document_id,
+                "spectrum_index": spectrum_index,
+                "spectrum_name": name,
+                "source_path": source_path,
+                "point_count": session.get("point_count"),
+                "existing_peak_count": len(peaks) if isinstance(peaks, list) else 0,
+            }
+            result["reminder"] = (
+                "Edits stay private until avantage_apply_fit_to_document. Reattach after saving."
+            )
+        return result
 
     @app.tool(annotations=WRITE)
     async def avantage_apply_fit_to_document(session_id: SessionId, save_to_original: bool = True) -> dict[str, Any]:
@@ -218,8 +446,7 @@ def create_server(bridge: BridgeClient | None = None) -> FastMCP:
         try:
             return await asyncio.to_thread(apply_document_model, client, session_id, save_to_original)
         except BridgeError as exc:
-            details = "" if exc.details is None else " Details: " + json.dumps(exc.details, ensure_ascii=False, default=str)
-            raise ToolError(str(exc) + details) from exc
+            raise fail(exc) from exc
         except (ValueError, OSError) as exc:
             raise ToolError(str(exc)) from exc
 
@@ -250,8 +477,7 @@ def create_server(bridge: BridgeClient | None = None) -> FastMCP:
         try:
             return await asyncio.to_thread(save_document_in_place, client, document_id, path)
         except BridgeError as exc:
-            details = "" if exc.details is None else " Details: " + json.dumps(exc.details, ensure_ascii=False, default=str)
-            raise ToolError(str(exc) + details) from exc
+            raise fail(exc) from exc
         except (ValueError, OSError) as exc:
             raise ToolError(str(exc)) from exc
 
@@ -537,6 +763,76 @@ def create_server(bridge: BridgeClient | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """Export raw intensities and energy axes to CSV/JSON with overwrite protection."""
         return await invoke("export_spectrum", session_id=session_id, path=path, format=format, overwrite=overwrite)
+
+    @app.tool(annotations=READ)
+    async def avantage_workspace_usage(stale_hours: StaleHours = 72.0) -> dict[str, Any]:
+        """Report private working-copy usage under the session root.
+
+        Every opened or attached spectrum is copied into its own folder that
+        survives close_session. Use this before pruning, and to explain disk
+        usage. Native leases protect sessions and projects across workers;
+        legacy folders without a lease are reported as unverified and kept.
+        `stale_folders` and `stale_bytes` show what avantage_prune_workspace
+        would reclaim at the same `stale_hours`, without modifying anything.
+        """
+        active = await active_working_paths()
+        usage = workspace.workspace_usage(keep_paths=active, stale_hours=stale_hours)
+        usage["active_session_count"] = len(active)
+        return usage
+
+    @app.tool(annotations=HOUSEKEEPING)
+    async def avantage_prune_workspace(
+        older_than_hours: StaleHours = 72.0,
+        dry_run: bool = True,
+        max_delete: PageLimit = 400,
+    ) -> dict[str, Any]:
+        """Delete stale private working-copy folders to reclaim disk space.
+
+        A folder is eligible only when its newest file is older than
+        older_than_hours and has an unlocked native lease. Live sessions and
+        projects across workers and unmarked legacy folders are kept.
+        Defaults to dry_run=true, which reports what would
+        be removed without touching anything. This never touches the user's
+        source spectra, VGP bundles or recovery backups.
+        """
+        active = await active_working_paths()
+        return await asyncio.to_thread(
+            workspace.prune_workspace,
+            older_than_hours=older_than_hours,
+            keep_paths=active,
+            dry_run=dry_run,
+            max_delete=max_delete,
+        )
+
+    @app.tool(annotations=READ)
+    async def avantage_list_backups(limit: PageLimit = 200) -> dict[str, Any]:
+        """Enumerate recovery material written by earlier save and writeback calls.
+
+        Recovery folders live outside the sample directory on the same volume,
+        so they are easy to lose track of. Each entry reports the transaction
+        kind, journal status, target original and whether a backup is present.
+        """
+        return await asyncio.to_thread(workspace.list_backups, limit=limit)
+
+    @app.tool(annotations=HOUSEKEEPING)
+    async def avantage_prune_backups(
+        older_than_days: BackupDays = 30.0,
+        dry_run: bool = True,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Delete finished recovery folders older than older_than_days.
+
+        Only journals whose status is committed or rolled_back are eligible;
+        an inspection_required or recovery_required journal is never removed.
+        Requires dry_run=false and confirm=true together, and defaults to a
+        read-only preview.
+        """
+        return await asyncio.to_thread(
+            workspace.prune_backups,
+            older_than_days=older_than_days,
+            dry_run=dry_run,
+            confirm=confirm,
+        )
 
     return app
 

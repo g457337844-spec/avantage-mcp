@@ -1,10 +1,25 @@
 # Avantage MCP
 
-用于 Windows 上 Thermo Scientific Avantage 的本地 MCP，覆盖 VGD/VGP 读取、背景、峰参数与约束、原生分峰和完整项目保存。当前版本 **1.3.1**，适配 **Avantage 6.9.0.59、Windows x64**。
+用于 Windows 上 Thermo Scientific Avantage 的本地 MCP，覆盖 VGD/VGP 读取、背景、峰参数与约束、原生分峰和完整项目保存。当前版本 **1.4.0**，适配 **Avantage 6.9.0.59、Windows x64**。
 
-当前提供 43 个工具。已经打开的 VGP 可以在原窗口直接调整已有峰参数和现有约束、执行原生拟合，默认完整备份后保存到原文件，无需关闭和重新打开。支持两个项目间选择目标；保存后核对所有谱区原始数据、模型和网格关联，并使旧关联失效。不会自动打开检查点或结果副本。自动打开/关闭文档继续禁用；改变峰数量、背景或约束属性集合仍使用私有项目文件流程。
+当前提供 47 个工具。已经打开的 VGP 可以在原窗口直接调整已有峰参数和现有约束、执行原生拟合，默认完整备份后保存到原文件，无需关闭和重新打开。支持两个项目间选择目标；保存后核对所有谱区原始数据、模型和网格关联，并使旧关联失效。不会自动打开检查点或结果副本。自动打开/关闭文档继续禁用；改变峰数量、背景或约束属性集合仍使用私有项目文件流程。
+
+### 2026-10-20 源码快照
+
+生产版本仍为 **1.4.0**。本次离线回归 **268 passed、37 skipped**，正常原生桥接编译通过。`native/inprocess/` 中的插件、事务和模型计划校验属于开发研究代码，**尚未接入正式 MCP 工具或安装流程**；不要把测试副本上的原生增删峰验证理解为已经发布的实时结构编辑功能。详见 [当前验证范围与未完成工作](docs/source-snapshot-20261020.md)。
 
 拟合直接调用 Avantage `PeakFitting.dll` 原生 simplex 引擎；背景、峰形和文件读写也使用厂商原生组件。每次拟合使用独立子进程，避免 MFC 拟合状态释放后再次运行崩溃。失败保留当前会话和模型；成功核对峰编号及谱图指纹，再替换参数。不依赖鼠标操作。
+
+## 1.4.0 变更
+
+- **新增 `avantage_workspace_usage` / `avantage_prune_workspace`**：私有工作副本此前只增不减（本机曾累积 2642 个目录、303 MB）。现在可按闲置时长清理，默认 `dry_run=true` 只预览；活跃会话的工作副本永不入选，符号链接和重解析点一律跳过。
+- **新增 `avantage_list_backups` / `avantage_prune_backups`**：枚举各磁盘 `\AvantageMCP\recovery` 下的备份与日志。只清理 `committed` / `rolled_back` 且超过指定天数的目录；`inspection_required`、`recovery_required` 永不自动删除。删除需同时传 `dry_run=false` 和 `confirm=true`。
+- **`avantage_status` 不再有歧义**：旧字段 `application.connected` 已移入 `legacy_acquisition_automation`，并新增 `live_processing_available`、`native_fitting_available`、`capability_meaning` 和 `recommended_next_step`。该字段过去恒为 false 却不代表实时功能不可用。
+- **错误信息附带处置建议**：`SESSION_NOT_FOUND`、`LIVE_OPERATION_BUSY`、`BACKGROUND_REQUIRED` 等 26 个错误码会追加 `Next: ...`，说明下一步该做什么。
+- **`list_document_spectra` 语义澄清**：新增 `active_in_grid`（原 `visible_in_grid` 保留为别名）和 `active_spectra` 汇总，说明该标志只表示是否画在可见网格中，不影响可关联性。
+- **`attach_document_spectrum` 回显**：返回 `attached` 块，含文档、索引、谱图名、点数与已有峰数，索引选错时立刻可见。
+- **工作流写入 `instructions`**：推荐顺序、能力前置检查、收敛判据与收尾清理直接提供给模型，不再只存在于 README。
+- **版本号统一**：`pyproject.toml`、`__init__.py`、安装元数据与原生桥接的 `server_version` 均为 1.4.0。
 
 ## 使用
 
@@ -105,6 +120,10 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Python 'C:\Python312\pyt
 | `avantage_save_spectrum` | 另存原生 VGD |
 | `avantage_export_spectrum` | 谱图 CSV/JSON |
 | `avantage_show_data_file` | 请求软件打开已保存 VGD |
+| `avantage_workspace_usage` | 工作副本占用统计（只读） |
+| `avantage_prune_workspace` | 清理闲置工作副本；默认只预览 |
+| `avantage_list_backups` | 枚举 recovery 备份与日志（只读） |
+| `avantage_prune_backups` | 清理已完成事务的备份；默认只预览 |
 
 ## 参数与边界
 
@@ -116,7 +135,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -Python 'C:\Python312\pyt
 
 范围约束用 `value1/value2` 表示上下限。关联约束提供 `reference_peak_id` 及运算符。结合能峰位关联支持加减；乘除需明确选择动能。循环关联会拒绝；删除被引用峰前先解除关联。
 
-`application.connected` 是旧采集自动化接口的遥测结果；`false` 不代表处理文档接口不可用。请用 `native_live_document_bridge_verified` 和 `list_processing_documents` 核对实时处理连接。
+`avantage_status` 的 `live_processing_supported` 表示原生桥接和文档生命周期能力已验证。`live_processing_available` 还要求 Avantage 正在运行且明确报告有响应；缺少响应状态时不会宣称可用。`application_response_state` 区分 `responding`、`not_responding`、`unknown` 与 `not_running`，下一步提示随状态变化。此状态不能代替具体操作前的文档、模态框与忙碌检查。旧的 `application.connected` 现位于 `legacy_acquisition_automation`，只反映采集自动化接口，`false` 是交互式安装的正常状态。
+
+工作副本位于会话根目录（默认 `%LOCALAPPDATA%\AvantageMCP\sessions`，可用 `AVANTAGE_WORK_DIR` 覆盖），`close_session` 只释放内存对象、不删除目录。用 `avantage_workspace_usage` 查看占用，用 `avantage_prune_workspace` 清理：默认 `dry_run=true`，只处理最新文件早于 `older_than_hours` 且原生租约已释放的目录。跨 worker 活跃谱图和完整项目均受租约保护；无租约的旧目录保留并计入 `kept_unverified`。活动查询失败时不执行清理。备份与日志位于各磁盘 `\AvantageMCP\recovery`，用 `avantage_list_backups` 枚举、`avantage_prune_backups` 清理（仅 `committed` / `rolled_back` 且需 `dry_run=false` 加 `confirm=true`）。
 
 `run_fit` 默认最多 1000 次迭代、原生收敛值 `0.0001`、独立拟合超时 90 秒。原生目标函数值由厂商算法返回；另外计算 RSS/RMSE。收敛不能直接证明化学模型正确。
 
@@ -166,7 +187,7 @@ $env:AVANTAGE_INTEGRATION = '1'
 
 真实测试覆盖源文件保护、中文路径、保存重开、能量校准、五种背景、峰与约束、对称/非对称连续拟合、同一会话重复拟合、迭代上限、限定范围、全部参数固定、失败保留模型、VGT/JSON 重载及 IPC 故障恢复。未设置环境变量时跳过依赖本机 Avantage 的测试。
 
-当前实际 MCP 客户端发现 43 个工具。1.3.1 验证覆盖连续两轮默认实时应用并保存、独立进程回读、正常关闭重开，以及两个已打开项目之间切换并分别保存、另一个项目保持不变。旧内部 SaveDocument 路径不再使用；保存后释放并重新取得谱图对象，避免复用失效的对象列表。仓库不含用户谱图和拟合结果。
+当前实际 MCP 客户端发现 47 个工具。1.3.1 验证覆盖连续两轮默认实时应用并保存、独立进程回读、正常关闭重开，以及两个已打开项目之间切换并分别保存、另一个项目保持不变。1.4.0 新增的四个维护工具在临时目录上完成真实删除验证，`146 passed, 37 skipped`（跳过项均需显式开启本机 Avantage 集成）。旧内部 SaveDocument 路径不再使用；保存后释放并重新取得谱图对象，避免复用失效的对象列表。仓库不含用户谱图和拟合结果。
 
 文件测试另设 `$env:AVANTAGE_VGP_FIXTURE` 为带同名 `.DATA` 的完整项目。实时保护测试还需设置 `$env:AVANTAGE_LIVE_INTEGRATION='1'`，不会自动打开或关闭应用文档。原窗口写入测试另需显式指定 `AVANTAGE_LIVE_WRITE_TEST=1`、`AVANTAGE_LIVE_WRITE_FIXTURE`，以及同名 `.mcp-test.json` 标记；该副本必须已打开，测试只修改并恢复峰标签。标记格式见验证文档。验证详情见 [docs/validation.md](docs/validation.md)。可复现原生拟合示例：
 

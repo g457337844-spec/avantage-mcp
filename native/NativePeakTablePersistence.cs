@@ -235,7 +235,7 @@ namespace AvantageMcp
             {
                 // IUnknown is the COM identity. An RPC out-reference can expose
                 // a different interface proxy than GetComInterfaceForObject.
-                foreach(var peak in peaks){IntPtr typed=Marshal.GetComInterfaceForObject(peak,typeof(IAvFittedPeak));try{Guid iid=new Guid("00000000-0000-0000-C000-000000000046");IntPtr identity;Marshal.ThrowExceptionForHR(Marshal.QueryInterface(typed,ref iid,out identity));pointers.Add(identity);}finally{Marshal.Release(typed);}}
+                foreach(var peak in peaks){if(peak==null){Engine.Trace("readpeaks: null peak in list");continue;}IntPtr typed=Marshal.GetComInterfaceForObject(peak,typeof(IAvFittedPeak));try{Guid iid=new Guid("00000000-0000-0000-C000-000000000046");IntPtr identity;Marshal.ThrowExceptionForHR(Marshal.QueryInterface(typed,ref iid,out identity));pointers.Add(identity);}finally{Marshal.Release(typed);}}
                 var result=new List<Dictionary<string,object>>();
                 for(int index=0;index<peaks.Count;index++)
                 {
@@ -257,7 +257,11 @@ namespace AvantageMcp
                         }
                         finally{if(constraint!=null)Marshal.ReleaseComObject(constraint);Marshal.Release(raw);}
                     }
-                    object background=null;IntPtr bgRaw;peak.GetBackground(out bgRaw);
+                    object background=null;IntPtr bgRaw=IntPtr.Zero;
+                    // A privately created peak has no background interface until
+                    // one is attached, and the vendor call faults on the null
+                    // reference instead of returning zero.
+                    try{peak.GetBackground(out bgRaw);}catch(NullReferenceException){bgRaw=IntPtr.Zero;}
                     if(bgRaw!=IntPtr.Zero)
                     {
                         IAvantageBackground bg=null;

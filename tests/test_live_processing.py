@@ -8,6 +8,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from test_native_projects import project_copy
 from avantage_mcp.bridge_client import BridgeClient, BridgeError
+from test_tool_inventory import EXPECTED_TOOL_COUNT
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("AVANTAGE_LIVE_INTEGRATION") != "1"
@@ -24,7 +25,7 @@ def test_real_mcp_disabled_live_writes_never_create_windows(project_copy, tmp_pa
         async with stdio_client(params) as (read,write):
             async with ClientSession(read,write) as client:
                 await client.initialize()
-                assert len((await client.list_tools()).tools)==43
+                assert len((await client.list_tools()).tools)==EXPECTED_TOOL_COUNT
                 async def good(name,args):
                     result=await client.call_tool("avantage_"+name,args)
                     assert not result.isError,result.content

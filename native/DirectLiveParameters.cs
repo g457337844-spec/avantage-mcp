@@ -6,7 +6,10 @@ using System.Runtime.InteropServices;
 namespace AvantageMcp {
 public sealed partial class Engine {
     static void ValidateLiveParameterUpdate(IList<Dictionary<string,object>> oldModel,IList<Dictionary<string,object>> next) {
-        if(oldModel.Count!=next.Count||next.Count==0)throw new Fault("LIVE_STRUCTURE_CHANGE_UNSUPPORTED","Same-window apply currently requires the same existing peak count; use private project processing for topology changes. No live change was sent.");
+        // Peak count is a pure topology question, so the rule lives in the
+        // COM-free LiveParameterPolicy and is exercised offline. Background and
+        // constraint shape stay here because they compare native snapshots.
+        LiveParameterPolicy.ValidatePeakTopology(oldModel.Count,next.Count);
         for(int i=0;i<next.Count;i++){
             if(!NativePeakTablePersistence.Equivalent(oldModel[i]["background"],next[i]["background"]))throw new Fault("LIVE_BACKGROUND_CHANGE_UNSUPPORTED","Same-window apply requires the existing background. No live change was sent.");
             var previous=(IEnumerable<Dictionary<string,object>>)oldModel[i]["constraints"];
@@ -72,16 +75,25 @@ public sealed partial class Engine {
         var model=Model(session,true);if(NativeSnapshot.Fingerprint(session.Data)!=link.OriginalFingerprint)throw new Fault("LIVE_DATA_CHANGED","Raw data and energy axes must remain unchanged.");
         var doc=Documents.Find(link.DocumentId);Documents.Activate(doc);var data=ProcessingCom.EnumerateData(doc.Pointer);List<IAvFittedPeak> remote=null;
         try{
+            Engine.Trace("apply:index="+link.Index+" data="+data.Count);
             if(link.Index<0||link.Index>=data.Count)throw new Fault("LIVE_DOCUMENT_CHANGED","The spectrum index changed.");
-            // A marshalled interface pointer is not a durable spectrum identity.
-            // The exact document, index, complete raw/axis fingerprint and full
-            // original model fingerprint below are the optimistic concurrency guard.
             var before=CaptureLiveDocument(doc,data);
-            if((string)before[link.Index]["data"]!=link.OriginalFingerprint||ObjectFingerprint(before[link.Index]["model"])!=link.OriginalModelFingerprint)throw new Fault("LIVE_MODEL_CHANGED","The original model changed after attachment.");
+            Engine.Trace("apply:captured");
             remote=ProcessingCom.Peaks(doc.Pointer,data[link.Index]);
+            Engine.Trace("apply:remote="+remote.Count);
             var previous=NativePeakTablePersistence.ReadPeaks(remote);
-            var expected=NativePeakTablePersistence.ReadPeaks(model.Peaks.Select(p=>p.Native).ToArray());
+            Engine.Trace("apply:previous="+previous.Count);
+            Engine.Trace("apply:modelPeaks="+model.Peaks.Count);
+            foreach(var pk in model.Peaks)Engine.Trace("apply:peak id="+pk.Id+" native="+(pk.Native==null?"NULL":"ok"));
+            var expected=NativePeakTablePersistence.ReadPeaks(new List<IAvFittedPeak>(model.Peaks.Select(p=>p.Native)));
+            Engine.Trace("apply:expected="+expected.Count);
+            // Validate structure before the fingerprint comparison: an empty
+            // original model has no serialized peak parameters, so the
+            // fingerprint guard would fault with a null reference instead of
+            // reporting the real reason (a topology change).
             ValidateLiveParameterUpdate(previous,expected);
+            Engine.Trace("apply:structure-ok");
+            if((string)before[link.Index]["data"]!=link.OriginalFingerprint||ObjectFingerprint(before[link.Index]["model"])!=link.OriginalModelFingerprint)throw new Fault("LIVE_MODEL_CHANGED","The original model changed after attachment.");
             int wasModified;Marshal.ThrowExceptionForHR(ProcessingCom.At<ProcessingCom.GetInt>(doc.Pointer,9)(doc.Pointer,out wasModified));
             int canonicalized=0;
             try{

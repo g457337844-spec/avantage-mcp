@@ -5,6 +5,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 import avantage_mcp.server as module
 from avantage_mcp.bridge_client import BridgeError
+from test_tool_inventory import EXPECTED_TOOL_COUNT
 
 
 @pytest.mark.parametrize('tool_name', ['avantage_save_processing_document_in_place', 'avantage_save_processing_document'])
@@ -18,7 +19,7 @@ def test_in_place_tool_schema_dispatch_and_write_annotation(monkeypatch, tool_na
     async def scenario():
         app=module.create_server(bridge)
         tools={tool.name:tool for tool in await app.list_tools()}
-        assert len(tools)==43
+        assert len(tools)==EXPECTED_TOOL_COUNT
         tool=tools[tool_name]
         assert tool.annotations.destructiveHint is True
         assert tool.annotations.readOnlyHint is False

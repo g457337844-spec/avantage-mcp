@@ -109,7 +109,14 @@ public sealed partial class Engine {
     ProcessingDocuments documents;ProcessingDocuments Documents{get{return documents??(documents=new ProcessingDocuments());}}
     static string ObjectFingerprint(object value){var json=new JavaScriptSerializer{MaxJsonLength=16*1024*1024};using(var sha=SHA256.Create())return BitConverter.ToString(sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(json.Serialize(NativePeakTablePersistence.PersistedModelParameters(value))))).Replace("-","");}
     object AttachDocumentSpectrum(Dictionary<string,object> args){if(sessions.Count>=32)throw new Fault("SESSION_LIMIT","Close a session first.");var doc=Documents.Find(J.Str(args,"document_id"));int index=J.Int(args,"spectrum_index",-1);var all=ProcessingCom.EnumerateData(doc.Pointer);SpectrumSession session=null;try{if(index<0||index>=all.Count)throw new Fault("SPECTRUM_NOT_FOUND","Choose an index returned by list_document_spectra.");IntPtr raw=all[index];var data=(IDataSpace)Marshal.GetObjectForIUnknown(raw);try{string id=Guid.NewGuid().ToString("N"),dir=Path.Combine(workRoot,id);Directory.CreateDirectory(dir);string copy=Path.Combine(dir,"spectrum.vgd");NativeSnapshot.CopyDataSpaceToFile(data,copy);session=new SpectrumSession{Id=id,DirectoryPath=dir,WorkingPath=copy,SourcePath=doc.PathName,NativeSourcePath=Convert.ToString(data.GetProperty(DSPropSet.STDPROPSET,DSPropID.DS_GEPROPID_SOURCE_FILE)),SourceHash=String.IsNullOrWhiteSpace(doc.PathName)||!File.Exists(doc.PathName)?null:ProjectPersistence.HashShared(doc.PathName),Data=new DataSpaceClass()};((DataSpaceClass)session.Data).LoadPersistFile(copy,0,1,0);session.Refresh();var peaks=ProcessingCom.Peaks(doc.Pointer,raw);try{var snapshots=NativePeakTablePersistence.ReadPeaks(peaks);ImportNativeSnapshots(session,snapshots);session.LiveLink=new LiveSpectrumLink{DocumentId=doc.Id,Index=index,DataIdentity=raw.ToInt64().ToString("X"),OriginalFingerprint=NativeSnapshot.Fingerprint(session.Data),OriginalModelFingerprint=ObjectFingerprint(snapshots)};if(session.FitState is NativePeakModel)session.LiveLink.OriginalPeakIds.AddRange(((NativePeakModel)session.FitState).Peaks.Select(p=>p.Id));}finally{ProcessingCom.ReleasePeaks(peaks);}sessions.Add(id,session);return J.Obj("session_id",session.Id,"session",session.Info(),"live_document",session.LiveLink.Info(),"model",session.FitState==null?null:Model(session).Info(),"background",session.BackgroundState==null?null:session.BackgroundState.Info());}finally{Marshal.ReleaseComObject(data);}}catch{if(session!=null)session.Dispose();throw;}finally{foreach(var p in all)Marshal.Release(p);}}
-    object ApplyFitToDocument(SpectrumSession s){return ApplyLiveParameters(s);}
+    object ApplyFitToDocument(SpectrumSession s){
+        // The public live contract updates parameters of peaks the application
+        // already owns. Creating peaks in an empty spectrum changes object
+        // ownership, so that experimental path is retained in source but is not
+        // reachable from here: an empty original model is rejected by the
+        // parameter path with LIVE_EMPTY_MODEL before any native mutation.
+        return ApplyLiveParameters(s);
+    }
 
 }
 }

@@ -36,6 +36,9 @@ EndpointAverage = Annotated[int, Field(ge=0, le=100, description="Native endpoin
 ShirleyIterations = Annotated[int, Field(ge=1, le=10000, description="Maximum native Shirley iterations.")]
 FitIterations = Annotated[int, Field(ge=1, le=100000, description="Maximum native simplex iterations.")]
 FitTimeout = Annotated[int, Field(ge=1, le=600, description="Isolated fit timeout in seconds; keep the MCP bridge/client timeout longer than this.")]
+StaleHours = Annotated[float, Field(ge=0, le=87600, allow_inf_nan=False, description="Working-copy age in hours before a folder may be pruned; 0 selects everything inactive.")]
+BackupDays = Annotated[float, Field(ge=0, le=3650, allow_inf_nan=False, description="Recovery-folder age in days before it may be pruned.")]
+PageLimit = Annotated[int, Field(ge=1, le=5000, description="Maximum number of entries or folders to process in one call.")]
 
 
 class PeakSpec(BaseModel):

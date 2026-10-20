@@ -117,9 +117,17 @@ public sealed partial class Engine : IDisposable {
     internal static void Trace(string step){if(Environment.GetEnvironmentVariable("AVANTAGE_TRACE")=="1"){string message=DateTime.UtcNow.ToString("O")+" "+step;Console.Error.WriteLine(message);string path=Environment.GetEnvironmentVariable("AVANTAGE_TRACE_PATH");if(!String.IsNullOrWhiteSpace(path))File.AppendAllText(path,message+Environment.NewLine);}}
     readonly Dictionary<string,SpectrumSession> sessions=new Dictionary<string,SpectrumSession>();
     readonly string workRoot;
+    WorkspaceLeases workspaceLeases;
+    void SyncWorkspaceLeases(){
+        if(workspaceLeases==null)workspaceLeases=new WorkspaceLeases(workRoot);
+        workspaceLeases.Sync(sessions.Values.Select(s=>s.DirectoryPath).Concat(projects.Values.Select(p=>Path.GetDirectoryName(p.WorkingPath))));
+    }
     public Engine(){workRoot=Path.GetFullPath(Environment.GetEnvironmentVariable("AVANTAGE_WORK_DIR") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"AvantageMCP","sessions"));Directory.CreateDirectory(workRoot);}
     public SpectrumSession Session(Dictionary<string,object>a){string id=J.Str(a,"session_id");SpectrumSession s;if(!sessions.TryGetValue(id,out s))throw new Fault("SESSION_NOT_FOUND","Session is not open in this worker. Reopen the source after worker restart.");return s;}
     public object Execute(string operation,Dictionary<string,object>a){
+        try{return ExecuteCore(operation,a);}finally{SyncWorkspaceLeases();}
+    }
+    object ExecuteCore(string operation,Dictionary<string,object>a){
         switch(operation) {
             case "status": return Status();
             case "application_status": return AppControl.Status();
@@ -163,7 +171,7 @@ public sealed partial class Engine : IDisposable {
         if(tables)capabilities.Add("native_vgp_read");
         if(projectSave)capabilities.Add("native_vgp_save_model");
         if(live)capabilities.AddRange(new[]{"live_document_read","live_document_apply_existing_parameters","live_document_save_original"});
-        return J.Obj("server_version","1.3.1","architecture",Environment.Is64BitProcess?"x64":"x86","avantage_home",Program.InstallRoot,"avantage_version",FileVersionInfo.GetVersionInfo(Path.Combine(Program.InstallRoot,"bin","Avantage.exe")).FileVersion,"open_sessions",sessions.Count,"application",AppControl.Status(),"backend","Avantage native COM","native_fit_solver_verified",solver,"private_table_abi_supported",tables,"native_project_save_verified",projectSave,"native_live_document_bridge_verified",live,"native_document_lifecycle_verified",live,"fit_host","one isolated native child per fit","capabilities",capabilities);
+        return J.Obj("server_version","1.4.0","architecture",Environment.Is64BitProcess?"x64":"x86","avantage_home",Program.InstallRoot,"avantage_version",FileVersionInfo.GetVersionInfo(Path.Combine(Program.InstallRoot,"bin","Avantage.exe")).FileVersion,"open_sessions",sessions.Count,"application",AppControl.Status(),"backend","Avantage native COM","native_fit_solver_verified",solver,"private_table_abi_supported",tables,"native_project_save_verified",projectSave,"native_live_document_bridge_verified",live,"native_document_lifecycle_verified",live,"fit_host","one isolated native child per fit","capabilities",capabilities);
     }
     object ChargeShift(SpectrumSession s,double delta){
         if(s.FitState!=null||s.BackgroundState!=null)throw new Fault("MODEL_ALREADY_DEFINED","Apply energy calibration before defining a background or fit model, or reopen a spectrum.");
@@ -215,7 +223,7 @@ public sealed partial class Engine : IDisposable {
         }finally{if(File.Exists(temp))File.Delete(temp);}
     }
     object ExportSpectrum(SpectrumSession s,string path,string format,bool overwrite){if(format!="csv"&&format!="json")throw new Fault("INVALID_ARGUMENT","format must be csv or json.");path=Target(s,path,"."+format,overwrite);string temp=Path.Combine(Path.GetDirectoryName(path),"."+Guid.NewGuid().ToString("N")+".tmp");try{if(format=="json"){var json=new JavaScriptSerializer{MaxJsonLength=64*1024*1024};File.WriteAllText(temp,json.Serialize(J.Obj("metadata",s.Info(),"x",s.X,"intensity",s.Y,"binding_energy",s.BindingEnergy)),new UTF8Encoding(false));}else{using(var w=new StreamWriter(temp,false,new UTF8Encoding(true))){w.WriteLine("raw_axis,kinetic_energy_eV,binding_energy_eV,intensity");for(int i=0;i<s.Y.Length;i++)w.WriteLine(string.Join(",",new[]{s.X[i].ToString("R",CultureInfo.InvariantCulture),s.EnergyScale=="kinetic"?s.X[i].ToString("R",CultureInfo.InvariantCulture):"",s.BindingEnergy==null?"":s.BindingEnergy[i].ToString("R",CultureInfo.InvariantCulture),s.Y[i].ToString("R",CultureInfo.InvariantCulture)}));}}Publish(temp,path,overwrite);return J.Obj("path",path,"format",format,"point_count",s.Y.Length);}finally{if(File.Exists(temp))File.Delete(temp);}}
-    public void Dispose(){foreach(var s in sessions.Values)s.Dispose();sessions.Clear();if(documents!=null)documents.Dispose();DisposeProjects();}
+    public void Dispose(){foreach(var s in sessions.Values)s.Dispose();sessions.Clear();if(documents!=null)documents.Dispose();DisposeProjects();if(workspaceLeases!=null)workspaceLeases.Dispose();}
     NativePeakModel Model(SpectrumSession s,bool create=false) {
         if(s.FitState==null&&create) {
             if(s.BindingEnergy==null||s.Axes.Count!=1)throw new Fault("UNSUPPORTED_DATA","Peak models require a one-dimensional energy spectrum.");

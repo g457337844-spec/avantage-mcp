@@ -23,3 +23,10 @@ verification/
 *.zip
 *.pem
 *.key
+*.DATA/
+*.data/
+*.opj
+*.opju
+*.dmp
+*.log
+outputs/
