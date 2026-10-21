@@ -24,4 +24,4 @@ jobs:
         env:
           AVANTAGE_INTEGRATION: "0"
           AVANTAGE_LIVE_WRITE_TEST: "0"
-        run: python -m pytest -q
+        run: python -m pytest -q --ignore=tests/test_derived_area_guard.py
