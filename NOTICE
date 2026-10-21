@@ -1,0 +1,23 @@
+Avantage MCP — Independent open-source adapter
+
+Copyright (c) 2026 g457337844-spec contributors.
+Source code supplied in this repository is made available under the MIT License,
+subject to ownership and third-party rights.
+
+Thermo Scientific and Avantage are trademarks of Thermo Fisher Scientific and/or
+their respective owners. This repository is not sponsored, endorsed, authorized,
+or maintained by Thermo Fisher Scientific.
+
+The project requires a separately installed and lawfully licensed copy of
+Thermo Scientific Avantage. No vendor executables, DLLs, software licenses,
+SDKs, instrument data, or proprietary spectral files are part of the proposed
+open-source distribution.
+
+MIT licensing of contributor-owned code does not license the commercial
+Avantage software, grant permission to reverse-engineer restricted components,
+or resolve third-party contract obligations. Users are responsible for checking
+the terms applicable to their licensed Avantage installation, especially before
+redistributing integrations that use undocumented internal interfaces.
+
+This source distribution does not include the unpublished experimental
+native/inprocess integration or internal research notes.
