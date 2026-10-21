@@ -7,7 +7,14 @@ name = "avantage-mcp"
 version = "1.4.0"
 description = "Local MCP server for Thermo Scientific Avantage native spectrum processing"
 requires-python = ">=3.10"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "g457337844-spec" }]
 dependencies = ["mcp>=1.26,<2", "pydantic>=2.11,<3"]
+
+[project.urls]
+Repository = "https://github.com/g457337844-spec/avantage-mcp"
+Issues = "https://github.com/g457337844-spec/avantage-mcp/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=8,<9"]

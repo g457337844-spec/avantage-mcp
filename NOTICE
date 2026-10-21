@@ -1,0 +1,6 @@
+Avantage MCP third-party and product notices
+
+Original project source: Copyright (c) 2026 g457337844-spec, MIT License.
+Thermo Scientific Avantage and its native libraries, COM type libraries and licenses are separate proprietary products. They are not distributed by this repository and are not relicensed under MIT. The source contains interoperation declarations for locally installed components; this notice does not grant rights to vendor software.
+The application uses the separately distributed MCP Python SDK and Pydantic. Their own licenses continue to apply.
+This is an independent integration and does not claim endorsement by Thermo Fisher Scientific, OriginLab, or OpenAI.

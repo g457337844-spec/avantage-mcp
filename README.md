@@ -2,6 +2,8 @@
 
 用于 Windows 上 Thermo Scientific Avantage 的本地 MCP，覆盖 VGD/VGP 读取、背景、峰参数与约束、原生分峰和完整项目保存。当前版本 **1.4.0**，适配 **Avantage 6.9.0.59、Windows x64**。
 
+本仓库的原创源码采用 [MIT 许可](LICENSE)；Avantage 本体与厂商组件不在许可范围内。它与 Origin Spectra MCP、Plotter 的职责和一键绘图目标见[协同工作流](docs/ecosystem.md)。
+
 当前提供 47 个工具。已经打开的 VGP 可以在原窗口直接调整已有峰参数和现有约束、执行原生拟合，默认完整备份后保存到原文件，无需关闭和重新打开。支持两个项目间选择目标；保存后核对所有谱区原始数据、模型和网格关联，并使旧关联失效。不会自动打开检查点或结果副本。自动打开/关闭文档继续禁用；改变峰数量、背景或约束属性集合仍使用私有项目文件流程。
 
 ### 2026-10-20 源码快照
@@ -55,7 +57,7 @@
 
 ## 安装和连接
 
-需要正常安装并注册 COM 组件的 Avantage、Windows x64、Python 3.10+ x64 和 .NET Framework。包含 C# 源码及本机编译的桥接 EXE；不包含厂商 DLL/许可证，不修改软件安装文件。
+需要正常安装并注册 COM 组件的 Avantage、Windows x64、Python 3.10+ x64 和 .NET Framework。仓库提供 C# 源码，安装时在本机构建桥接 EXE；不包含厂商 DLL/许可证，不修改软件安装文件。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -RegisterCodex
@@ -198,3 +200,7 @@ $env:AVANTAGE_INTEGRATION = '1'
 示例使用 Avantage 自带 PET1407 C1s 谱图，峰标签仅用于数值流程演示，不作化学归属结论。
 
 `src/avantage_mcp` 为 MCP 服务，`native` 为 C# 桥接，`scripts/build-native.ps1` 为构建入口，`tests` 为测试。官方 SDK 使用 stdio；原生桥接为 x64 .NET Framework STA 进程，日志走标准错误。
+
+## 开源与参与
+
+[第三方说明](NOTICE) · [贡献指南](CONTRIBUTING.md) · [安全说明](SECURITY.md)。历史验证与研究原型不代表新的稳定版本或跨工具联动已经验证。
