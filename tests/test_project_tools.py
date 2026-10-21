@@ -60,7 +60,7 @@ def test_project_save_requires_verified_capability_before_any_write():
         bridge = RecordingBridge()
         with pytest.raises(ToolError, match="PROJECT_SAVE_NOT_VERIFIED"):
             await create_server(bridge).call_tool(
-                "avantage_save_project_model", {"session_id": "s1", "path": r"E:\数据\结果.vgp"},
+                "avantage_save_project_model", {"session_id": "s1", "path": r"D:\SyntheticFixtures\结果.vgp"},
             )
         assert bridge.calls == [("status", {})]
 
@@ -70,7 +70,7 @@ def test_project_save_requires_verified_capability_before_any_write():
 def test_verified_project_save_forwards_session_and_unicode_destination():
     async def scenario():
         bridge = RecordingBridge(project_save_verified=True)
-        arguments = {"session_id": "s1", "path": r"E:\数据\结果.vgp"}
+        arguments = {"session_id": "s1", "path": r"D:\SyntheticFixtures\结果.vgp"}
         await create_server(bridge).call_tool("avantage_save_project_model", arguments)
         assert bridge.calls == [("status", {}), ("save_project_model", arguments)]
 
@@ -78,7 +78,7 @@ def test_verified_project_save_forwards_session_and_unicode_destination():
 
 
 @pytest.mark.parametrize("name,args,operation", [
-    ("avantage_open_processing_project", {"path": r"E:\数据\C.vgp"}, "open_processing_project"),
+    ("avantage_open_processing_project", {"path": r"D:\SyntheticFixtures\C.vgp"}, "open_processing_project"),
     ("avantage_list_project_spectra", {"project_id": "p1"}, "list_project_spectra"),
     ("avantage_open_project_spectrum", {"project_id": "p1", "spectrum_index": 9}, "open_project_spectrum"),
     ("avantage_close_processing_project", {"project_id": "p1"}, "close_processing_project"),
@@ -105,7 +105,7 @@ def test_automatic_open_is_disabled_even_when_live_reads_are_verified(live_verif
     async def scenario():
         bridge = RecordingBridge(live_verified=live_verified)
         with pytest.raises(ToolError, match='LIVE_OPEN_NOT_VERIFIED'):
-            await create_server(bridge).call_tool('avantage_open_processing_document', {'path': r'E:\数据\2.vgp'})
+            await create_server(bridge).call_tool('avantage_open_processing_document', {'path': r'D:\SyntheticFixtures\2.vgp'})
         assert bridge.calls == []
     asyncio.run(scenario())
 
