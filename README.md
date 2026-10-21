@@ -1,5 +1,7 @@
 # Avantage MCP
 
+> 独立的非官方科研工具。本仓库自有代码拟按 [MIT](LICENSE) 开源；需另行安装及授权 Avantage。源码包不包含厂商 DLL、许可证或实验数据。详细界限见 [NOTICE](NOTICE)。
+
 用于 Windows 上 Thermo Scientific Avantage 的本地 MCP，覆盖 VGD/VGP 读取、背景、峰参数与约束、原生分峰和完整项目保存。当前版本 **1.4.0**，适配 **Avantage 6.9.0.59、Windows x64**。
 
 当前提供 47 个工具。已经打开的 VGP 可以在原窗口直接调整已有峰参数和现有约束、执行原生拟合，默认完整备份后保存到原文件，无需关闭和重新打开。支持两个项目间选择目标；保存后核对所有谱区原始数据、模型和网格关联，并使旧关联失效。不会自动打开检查点或结果副本。自动打开/关闭文档继续禁用；改变峰数量、背景或约束属性集合仍使用私有项目文件流程。
@@ -27,7 +29,7 @@
 
 安装后在 Codex MCP 设置中启用 `avantage`，按客户端提示刷新连接或重新打开会话。可以直接用自然语言，例如：
 
-> 打开 E:\数据\样品\C1s.VGD，读取数据。设置 Shirley 背景，按我提供的峰位、峰宽和关联约束运行原生分峰。检查收敛情况，分别另存 VGD、VGT、分峰曲线 CSV 和模型参数 JSON。
+> 打开 D:\SyntheticFixtures\样品\C1s.VGD，读取数据。设置 Shirley 背景，按我提供的峰位、峰宽和关联约束运行原生分峰。检查收敛情况，分别另存 VGD、VGT、分峰曲线 CSV 和模型参数 JSON。
 
 推荐顺序：`status` → `open_spectrum` → 可选 `charge_shift` → `set_background` → `add_peak` → `set_peak_constraint` → `run_fit` → `get_model_curve` → 保存结果。后续工具使用打开谱图返回的 `session_id`。
 

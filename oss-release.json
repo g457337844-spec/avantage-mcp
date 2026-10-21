@@ -1,0 +1,39 @@
+{
+  "project": "Avantage MCP",
+  "include": [
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+    "requirements.lock.txt",
+    ".gitignore",
+    "install.ps1",
+    "launch.cmd",
+    "src",
+    "native",
+    "scripts/build-native.ps1",
+    "scripts/register-codex.ps1",
+    "scripts/set-codex-timeout.ps1",
+    "tests",
+    "examples",
+    "skills",
+    "docs/validation.md",
+    "docs/source-snapshot-20261020.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "docs/ECOSYSTEM.md",
+    "oss-release.json",
+    "NOTICE",
+    ".github/workflows/ci.yml"
+  ],
+  "exclude": [
+    "native/inprocess",
+    "tests/native",
+    "tests/test_inprocess_context_probe.py",
+    "tests/test_processing_proxy_inventory.py",
+    "tests/test_live_model_plan_policy.py",
+    "tests/test_inprocess_context_probe.py",
+    "tests/test_writeback_tool.py",
+    "**/__pycache__/**"
+  ],
+  "manual_review": []
+}
