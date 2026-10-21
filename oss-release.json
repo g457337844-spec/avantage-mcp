@@ -21,7 +21,9 @@
     "CONTRIBUTING.md",
     "SECURITY.md",
     "docs/ECOSYSTEM.md",
-    "oss-release.json"
+    "oss-release.json",
+    "NOTICE",
+    ".github/workflows/ci.yml"
   ],
   "exclude": [
     "native/inprocess",
@@ -33,7 +35,5 @@
     "tests/test_writeback_tool.py",
     "**/__pycache__/**"
   ],
-  "manual_review": [
-    "native/VerifiedBuild.cs"
-  ]
+  "manual_review": []
 }
