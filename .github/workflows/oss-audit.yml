@@ -1,0 +1,21 @@
+name: OSS release source audit
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout current source only
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Check allowlist, private paths, embedded credentials and license gate
+        run: python scripts/oss_release_audit.py
