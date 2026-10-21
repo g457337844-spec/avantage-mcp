@@ -29,7 +29,7 @@
 
 安装后在 Codex MCP 设置中启用 `avantage`，按客户端提示刷新连接或重新打开会话。可以直接用自然语言，例如：
 
-> 打开 E:\数据\样品\C1s.VGD，读取数据。设置 Shirley 背景，按我提供的峰位、峰宽和关联约束运行原生分峰。检查收敛情况，分别另存 VGD、VGT、分峰曲线 CSV 和模型参数 JSON。
+> 打开 D:\SyntheticFixtures\样品\C1s.VGD，读取数据。设置 Shirley 背景，按我提供的峰位、峰宽和关联约束运行原生分峰。检查收敛情况，分别另存 VGD、VGT、分峰曲线 CSV 和模型参数 JSON。
 
 推荐顺序：`status` → `open_spectrum` → 可选 `charge_shift` → `set_background` → `add_peak` → `set_peak_constraint` → `run_fit` → `get_model_curve` → 保存结果。后续工具使用打开谱图返回的 `session_id`。
 
