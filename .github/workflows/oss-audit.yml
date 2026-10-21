@@ -17,5 +17,14 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
-      - name: Check allowlist, private paths, embedded credentials and license gate
+      - name: Audit source allowlist and publication blockers
         run: python scripts/oss_release_audit.py
+      - name: Create new-history-free source snapshot
+        run: python scripts/oss_release_audit.py --export "${{ runner.temp }}/oss-export/${{ github.event.repository.name }}"
+      - name: Store private, review-only source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: "oss-candidate-${{ github.event.repository.name }}-${{ github.sha }}"
+          path: "${{ runner.temp }}/oss-export/${{ github.event.repository.name }}"
+          if-no-files-found: error
+          retention-days: 7
